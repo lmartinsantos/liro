@@ -65,7 +65,7 @@ func svgObject(o model.Object, objects map[string]model.Object) string {
 	case "line", "spline":
 		pts := svgPoints(o)
 		return fmt.Sprintf(`<polyline %s points="%s" fill="none" stroke="%s" stroke-width="%.1f"/>`, idAttr, pts, stroke, math.Max(sw, 1))
-	case "triangle", "diamond", "arrow":
+	case "triangle", "diamond", "arrow", "hexagon", "parallelogram":
 		pts := o.Points
 		if len(pts) < 6 {
 			pts = PolygonFor(o.Type, o.W, o.H)
@@ -78,6 +78,29 @@ func svgObject(o model.Object, objects map[string]model.Object) string {
 			fmt.Fprintf(&sb, "%.1f,%.1f", o.X+pts[i], o.Y+pts[i+1])
 		}
 		return fmt.Sprintf(`<polygon %s points="%s" fill="%s" stroke="%s" stroke-width="%.1f"%s/>`, idAttr, sb.String(), fill, stroke, sw, rot)
+	case "cylinder":
+		// Standing cylinder (side elevation): body + bottom front arc + top ellipse.
+		rx, ry := o.W/2, math.Min(o.H*0.16, o.W*0.22)
+		cx, topY, botY := o.X+o.W/2, o.Y+ry, o.Y+o.H-ry
+		return fmt.Sprintf(
+			`<g %s%s><path d="M%.1f %.1f V%.1f A%.1f %.1f 0 0 0 %.1f %.1f V%.1f Z" fill="%s" stroke="%s" stroke-width="%.1f"/><ellipse cx="%.1f" cy="%.1f" rx="%.1f" ry="%.1f" fill="%s" stroke="%s" stroke-width="%.1f"/></g>`,
+			idAttr, rot,
+			o.X, topY, botY, rx, ry, o.X+o.W, botY, topY, fill, stroke, sw,
+			cx, topY, rx, ry, fill, stroke, sw,
+		)
+	case "roundrect":
+		r := o.CornerRadius
+		if r <= 0 {
+			r = math.Min(16, math.Min(o.W, o.H)/2)
+		}
+		if r > o.W/2 {
+			r = o.W / 2
+		}
+		if r > o.H/2 {
+			r = o.H / 2
+		}
+		return fmt.Sprintf(`<rect %s x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="%.1f" ry="%.1f" fill="%s" stroke="%s" stroke-width="%.1f"%s/>`,
+			idAttr, o.X, o.Y, math.Max(o.W, 1), math.Max(o.H, 1), r, r, fill, stroke, sw, rot)
 	case "connector":
 		pts := ConnectorRoute(o, objects)
 		if len(pts) < 4 {

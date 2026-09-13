@@ -3,6 +3,7 @@ import { ThemeProvider } from '@/lib/theme'
 import { BoardPage } from '@/pages/BoardPage'
 import { HomePage } from '@/pages/HomePage'
 import { JoinPage } from '@/pages/JoinPage'
+import { ViewPage } from '@/pages/ViewPage'
 
 export default function App() {
   return (
@@ -12,6 +13,7 @@ export default function App() {
           <Route path="/" element={<HomePage />} />
           <Route path="/b/:boardId" element={<JoinPage />} />
           <Route path="/b/:boardId/board" element={<BoardPage />} />
+          <Route path="/b/:boardId/view" element={<ViewPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>

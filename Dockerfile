@@ -19,7 +19,10 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /liro ./cmd/server
+COPY VERSIONS ./
+COPY --from=web /src/dist ./internal/static/dist
+RUN VERSION=$(sed -n 's/^liro=//p' VERSIONS) \
+	&& CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /liro ./cmd/server
 
 # --- runtime ---------------------------------------------------------------
 FROM alpine:3.21
@@ -28,11 +31,9 @@ RUN adduser -D -H -u 65532 liro \
 	&& chown liro:liro /data
 
 COPY --from=server /liro /liro
-COPY --from=web /src/dist /web/dist
 
 ENV LIRO_ADDR=:8080 \
-	LIRO_DATA=/data \
-	LIRO_STATIC=/web/dist
+	LIRO_DATA=/data
 
 EXPOSE 8080
 VOLUME /data

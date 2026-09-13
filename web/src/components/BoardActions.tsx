@@ -274,6 +274,88 @@ export async function downloadBoard(board: Meta, password?: string) {
   downloadBlob(blob, filename)
 }
 
+export function shareViewUrl(boardId: string) {
+  return `${window.location.origin}/b/${boardId}/view`
+}
+
+export function embedSnippet(boardId: string) {
+  const src = `${window.location.origin}/b/${boardId}/view?embed=1`
+  return `<iframe src="${src}" width="100%" height="480" style="border:0" loading="lazy" title="Liro board"></iframe>`
+}
+
+type EmbedDialogProps = {
+  open: boolean
+  boardId: string
+  boardName: string
+  onClose: () => void
+}
+
+export function EmbedDialog({ open, boardId, boardName, onClose }: EmbedDialogProps) {
+  const [copied, setCopied] = useState<'link' | 'embed' | null>(null)
+  const viewUrl = shareViewUrl(boardId)
+  const snippet = embedSnippet(boardId)
+
+  const copy = async (kind: 'link' | 'embed', text: string) => {
+    await navigator.clipboard.writeText(text)
+    setCopied(kind)
+    window.setTimeout(() => setCopied(null), 1500)
+  }
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(v) => {
+        if (!v) {
+          setCopied(null)
+          onClose()
+        }
+      }}
+    >
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Embed & share</DialogTitle>
+          <DialogDescription>
+            Read-only link and embed code for “{boardName}”. Viewers can pan and zoom but not edit.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <label className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
+              Share link
+            </label>
+            <div className="flex gap-2">
+              <Input readOnly value={viewUrl} className="font-mono text-xs" onFocus={(e) => e.target.select()} />
+              <Button type="button" variant="secondary" onClick={() => void copy('link', viewUrl)}>
+                {copied === 'link' ? 'Copied' : 'Copy'}
+              </Button>
+            </div>
+          </div>
+          <div className="space-y-2">
+            <label className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
+              Embed code
+            </label>
+            <textarea
+              readOnly
+              value={snippet}
+              rows={3}
+              className="w-full resize-none rounded-2xl border border-input bg-transparent px-3 py-2 font-mono text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              onFocus={(e) => e.target.select()}
+            />
+            <DialogFooter className="mt-0">
+              <Button type="button" variant="ghost" onClick={onClose}>
+                Close
+              </Button>
+              <Button type="button" onClick={() => void copy('embed', snippet)}>
+                {copied === 'embed' ? 'Copied' : 'Copy embed'}
+              </Button>
+            </DialogFooter>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 export function BoardMenu({
   children,
   className,

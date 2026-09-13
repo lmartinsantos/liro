@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
+	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,15 +29,13 @@ type Server struct {
 	Store  *store.Store
 	Hubs   *hub.Registry
 	Tokens *auth.Tokens
-	Static string
 }
 
-func New(st *store.Store, hubs *hub.Registry, static string) http.Handler {
+func New(st *store.Store, hubs *hub.Registry, static fs.FS) http.Handler {
 	s := &Server{
 		Store:  st,
 		Hubs:   hubs,
 		Tokens: auth.NewTokens(""),
-		Static: static,
 	}
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -57,6 +57,7 @@ func New(st *store.Store, hubs *hub.Registry, static string) http.Handler {
 		r.Post("/boards", s.createBoard)
 		r.Post("/boards/import", s.importBoard)
 		r.Get("/boards/{id}", s.getBoard)
+		r.Get("/boards/{id}/document", s.getDocument)
 		r.Delete("/boards/{id}", s.deleteBoard)
 		r.Post("/boards/{id}/unlock", s.unlockBoard)
 		r.Post("/boards/{id}/password", s.setPassword)
@@ -66,6 +67,8 @@ func New(st *store.Store, hubs *hub.Registry, static string) http.Handler {
 		r.Get("/boards/{id}/users", s.listUsers)
 		r.Post("/boards/{id}/users", s.addUser)
 		r.Get("/boards/{id}/snapshots", s.listSnapshots)
+		r.Post("/boards/{id}/snapshots", s.createSnapshot)
+		r.Post("/boards/{id}/snapshots/{ts}/restore", s.restoreSnapshot)
 		r.Post("/boards/{id}/assets", s.uploadAsset)
 		r.Get("/boards/{id}/assets/{name}", s.getAsset)
 	})
@@ -75,7 +78,7 @@ func New(st *store.Store, hubs *hub.Registry, static string) http.Handler {
 	r.Handle("/mcp", mcpHandler)
 	r.Handle("/mcp/", mcpHandler)
 
-	if static != "" {
+	if static != nil {
 		r.Handle("/*", spaHandler(static))
 	}
 	return r
@@ -127,6 +130,30 @@ func (s *Server) getBoard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, meta.Public())
+}
+
+// getDocument returns the live board document for read-only viewing / embeds.
+// Password-protected boards require a valid unlock token (header or ?unlock=).
+func (s *Server) getDocument(w http.ResponseWriter, r *http.Request) {
+	rec, err := s.Store.Get(chi.URLParam(r, "id"))
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "board not found")
+		return
+	}
+	var meta model.Meta
+	var doc model.Document
+	rec.WithLock(func() {
+		meta = rec.Meta
+		doc = rec.Document
+	})
+	if meta.HasPassword() && !s.unlocked(r, meta.ID) {
+		writeErr(w, http.StatusUnauthorized, "password required")
+		return
+	}
+	writeJSON(w, map[string]any{
+		"meta":     meta.Public(),
+		"document": doc,
+	})
 }
 
 func (s *Server) unlockBoard(w http.ResponseWriter, r *http.Request) {
@@ -502,6 +529,67 @@ func (s *Server) listSnapshots(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, list)
 }
 
+func (s *Server) createSnapshot(w http.ResponseWriter, r *http.Request) {
+	boardID := chi.URLParam(r, "id")
+	rec, err := s.Store.Get(boardID)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "board not found")
+		return
+	}
+	var meta model.Meta
+	rec.WithLock(func() { meta = rec.Meta })
+	var body struct {
+		Password string `json:"password"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := s.authorizeManage(r, meta, body.Password); err != nil {
+		writeAuthErr(w, err)
+		return
+	}
+	info, err := s.Store.ForceSnapshot(boardID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+	writeJSON(w, info)
+}
+
+func (s *Server) restoreSnapshot(w http.ResponseWriter, r *http.Request) {
+	boardID := chi.URLParam(r, "id")
+	tsStr := chi.URLParam(r, "ts")
+	ts, err := strconv.ParseInt(tsStr, 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid snapshot timestamp")
+		return
+	}
+	rec, err := s.Store.Get(boardID)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "board not found")
+		return
+	}
+	var meta model.Meta
+	rec.WithLock(func() { meta = rec.Meta })
+	var body struct {
+		Password string `json:"password"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := s.authorizeManage(r, meta, body.Password); err != nil {
+		writeAuthErr(w, err)
+		return
+	}
+	if err := s.Store.RestoreSnapshot(boardID, ts); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeErr(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.Hubs.BroadcastState(boardID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) wsBoard(w http.ResponseWriter, r *http.Request) {
 	boardID := chi.URLParam(r, "id")
 	userID := r.URL.Query().Get("userId")
@@ -655,18 +743,31 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-func spaHandler(dir string) http.Handler {
-	fs := http.FileServer(http.Dir(dir))
+func spaHandler(fsys fs.FS) http.Handler {
+	fileServer := http.FileServer(http.FS(fsys))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api") || strings.HasPrefix(r.URL.Path, "/ws") || strings.HasPrefix(r.URL.Path, "/mcp") {
 			http.NotFound(w, r)
 			return
 		}
-		p := filepath.Join(dir, filepath.Clean(r.URL.Path))
-		if info, err := os.Stat(p); err == nil && !info.IsDir() {
-			fs.ServeHTTP(w, r)
+		name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
+		if name == "" || name == "." {
+			name = "index.html"
+		}
+		if f, err := fsys.Open(name); err == nil {
+			info, statErr := f.Stat()
+			_ = f.Close()
+			if statErr == nil && !info.IsDir() {
+				fileServer.ServeHTTP(w, r)
+				return
+			}
+		}
+		index, err := fs.ReadFile(fsys, "index.html")
+		if err != nil {
+			http.NotFound(w, r)
 			return
 		}
-		http.ServeFile(w, r, filepath.Join(dir, "index.html"))
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(index)
 	})
 }

@@ -215,6 +215,25 @@ func (reg *Registry) Drop(boardID string) {
 	reg.store.Unload(boardID)
 }
 
+// BroadcastState pushes a full board state envelope to every client in the room.
+func (reg *Registry) BroadcastState(boardID string) {
+	reg.mu.Lock()
+	room, ok := reg.rooms[boardID]
+	reg.mu.Unlock()
+	if !ok {
+		return
+	}
+	room.mu.Lock()
+	clients := make([]*Client, 0, len(room.clients))
+	for _, cl := range room.clients {
+		clients = append(clients, cl)
+	}
+	room.mu.Unlock()
+	for _, cl := range clients {
+		room.sendState(cl)
+	}
+}
+
 func (r *Room) Submit(cl *Client, msg Envelope) {
 	select {
 	case r.inbox <- inbound{client: cl, msg: msg}:

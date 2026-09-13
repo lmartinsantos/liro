@@ -1,10 +1,11 @@
-import { Archive, Download, Ellipsis, KeyRound, MessageCircle, Trash2 } from 'lucide-react'
+import { Archive, Code2, Download, Ellipsis, History, KeyRound, Magnet, MessageCircle, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { AttachBar } from '@/components/AttachBar'
 import {
   BoardMenu,
   DeleteBoardDialog,
+  EmbedDialog,
   MenuItem,
   PasswordPromptDialog,
   SetPasswordDialog,
@@ -13,6 +14,7 @@ import {
 } from '@/components/BoardActions'
 import { Brand } from '@/components/Brand'
 import { ChatPanel } from '@/components/ChatPanel'
+import { HistoryPanel } from '@/components/HistoryPanel'
 import { LayoutBar } from '@/components/LayoutBar'
 import { StickerBar, STICKER_EMOJIS } from '@/components/StickerBar'
 import { TextFormatBar } from '@/components/TextFormatBar'
@@ -41,6 +43,7 @@ import {
 } from '@/lib/images'
 import { alignPatches, distributePatches, layoutTargets, type Align, zPatches } from '@/lib/layout'
 import { containerAt, nextZ, objectAABB, unionBoxes } from '@/lib/ops'
+import { readSnapEnabled, writeSnapEnabled } from '@/lib/snap'
 import { isTexty } from '@/lib/textStyle'
 import type { Attachment, BoardObject, Meta, Tool, User } from '@/lib/types'
 import { useBoardSession } from '@/lib/useBoardSession'
@@ -57,7 +60,10 @@ const toolKeys: Record<string, Tool> = {
   t: 'text',
   d: 'diamond',
   a: 'arrow',
+  h: 'hexagon',
+  p: 'parallelogram',
   c: 'connector',
+  m: 'mindmap',
   f: 'frame',
   k: 'lane',
 }
@@ -132,6 +138,7 @@ function BoardSession({
   const [menuOpen, setMenuOpen] = useState(false)
   const [passwordOpen, setPasswordOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const [embedOpen, setEmbedOpen] = useState(false)
   const [prompt, setPrompt] = useState<{
     title: string
     run: (password: string) => Promise<void>
@@ -151,6 +158,8 @@ function BoardSession({
     textAlign: 'left',
   })
   const [stickerEmoji, setStickerEmoji] = useState(STICKER_EMOJIS[0])
+  const [snapEnabled, setSnapEnabled] = useState(readSnapEnabled)
+  const [historyOpen, setHistoryOpen] = useState(false)
   const objects = session.doc.objects
   const selected = selectedIds.length === 1 ? objects[selectedIds[0]] : undefined
   const showType = tool === 'postit' || tool === 'text' || !!(selected && isTexty(selected.type))
@@ -180,7 +189,10 @@ function BoardSession({
 
   const applyPatches = useCallback(
     (patches: { id: string; path: string; value: unknown }[]) => {
-      for (const p of patches) session.updateObject(p.id, p.path, p.value)
+      if (!patches.length) return
+      session.withBatch(() => {
+        for (const p of patches) session.updateObject(p.id, p.path, p.value)
+      })
     },
     [session],
   )
@@ -204,8 +216,10 @@ function BoardSession({
       strokeWidth: 1,
       attachments: [],
     }
-    session.createObject(group)
-    for (const m of members) session.updateObject(m.id, 'parentId', id)
+    session.withBatch(() => {
+      session.createObject(group)
+      for (const m of members) session.updateObject(m.id, 'parentId', id)
+    })
     setSelectedIds([id])
   }, [canvas.frameStroke, objects, selectedIds, session, setSelectedIds])
 
@@ -230,7 +244,9 @@ function BoardSession({
     }
     if (!source.length) return
     const clones = cloneForPaste(source, objects)
-    for (const o of clones) session.createObject(o)
+    session.withBatch(() => {
+      for (const o of clones) session.createObject(o)
+    })
     setSelectedIds(clones.map((o) => o.id))
     setTool('select')
   }, [objects, session, setSelectedIds, setTool])
@@ -241,6 +257,7 @@ function BoardSession({
       const live = { ...objects }
       let i = 0
       let lastError = ''
+      const created: BoardObject[] = []
       for (const file of files) {
         if (file.size > IMAGE_MAX_BYTES) {
           lastError = 'Image is too large (max 12MB)'
@@ -265,7 +282,7 @@ function BoardSession({
             text: file.name,
             parentId: host?.id,
           })
-          session.createObject(obj)
+          created.push(obj)
           live[obj.id] = obj
           ids.push(obj.id)
           i += 1
@@ -274,7 +291,10 @@ function BoardSession({
           console.warn('image paste failed', err)
         }
       }
-      if (ids.length) {
+      if (created.length) {
+        session.withBatch(() => {
+          for (const obj of created) session.createObject(obj)
+        })
         setSelectedIds(ids)
         setTool('select')
         setNotice(null)
@@ -299,8 +319,10 @@ function BoardSession({
       for (const o of Object.values(objects)) {
         if (o.parentId === g) nextSel.push(o.id)
       }
-      session.deleteObject(g)
     }
+    session.withBatch(() => {
+      for (const g of groups) session.deleteObject(g)
+    })
     setSelectedIds(nextSel)
   }, [objects, selectedIds, session, setSelectedIds])
 
@@ -331,13 +353,22 @@ function BoardSession({
       }
       const t = toolKeys[e.key.toLowerCase()]
       if (t && !e.metaKey && !e.ctrlKey) setTool(t)
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault()
+        session.redo()
+        return
+      }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault()
-        session.undo()
+        if (e.shiftKey) session.redo()
+        else session.undo()
+        return
       }
       if ((e.key === 'Backspace' || e.key === 'Delete') && selectedIds.length) {
         e.preventDefault()
-        for (const id of selectedIds) session.deleteObject(id)
+        session.withBatch(() => {
+          for (const id of selectedIds) session.deleteObject(id)
+        })
         setSelectedIds([])
       }
     }
@@ -387,7 +418,10 @@ function BoardSession({
   const applyColor = (kind: 'fill' | 'stroke', color: string) => {
     if (kind === 'fill') setFill(color)
     else setStroke(color)
-    for (const id of selectedIds) session.updateObject(id, kind, color)
+    if (!selectedIds.length) return
+    session.withBatch(() => {
+      for (const id of selectedIds) session.updateObject(id, kind, color)
+    })
   }
 
   const boardMeta: Meta = localMeta ?? session.meta ?? {
@@ -405,7 +439,11 @@ function BoardSession({
 
   return (
     <div className="flex h-svh flex-col bg-background" onClick={() => setMenuOpen(false)}>
-      <header className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-start justify-between p-3">
+      <header
+        className={`pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between p-3 ${
+          menuOpen ? 'z-30' : 'z-10'
+        }`}
+      >
         <div className="pointer-events-auto relative flex h-14 items-center gap-3 rounded-3xl bg-card px-4 shadow-card">
           <Brand />
           <span className="text-muted-foreground">/</span>
@@ -422,58 +460,81 @@ function BoardSession({
             variant="ghost"
             size="icon"
             className="size-8"
-            hint="Board menu"
+            hint="Embed & share"
             onClick={(e) => {
               e.stopPropagation()
-              setMenuOpen((v) => !v)
+              setEmbedOpen(true)
             }}
           >
-            <Ellipsis />
+            <Code2 />
           </Button>
-          {menuOpen && (
-            <div onClick={(e) => e.stopPropagation()}>
-              <BoardMenu className="absolute left-0 top-full z-20 mt-1 min-w-[11rem] rounded-2xl bg-card p-1 shadow-card">
-                <MenuItem
-                  onClick={() => {
-                    setMenuOpen(false)
-                    setPasswordOpen(true)
-                  }}
-                >
-                  <KeyRound className="size-4" /> Password
-                </MenuItem>
-                <MenuItem
-                  onClick={() => {
-                    setMenuOpen(false)
-                    withPrompt('Download board', async (password) => {
-                      await downloadBoard(boardMeta, password)
-                    })
-                  }}
-                >
-                  <Download className="size-4" /> Download
-                </MenuItem>
-                <MenuItem
-                  onClick={() => {
-                    setMenuOpen(false)
-                    withPrompt('Archive board', async (password) => {
-                      await api.archiveBoard(boardId, password)
-                      nav('/')
-                    })
-                  }}
-                >
-                  <Archive className="size-4" /> Archive
-                </MenuItem>
-                <MenuItem
-                  destructive
-                  onClick={() => {
-                    setMenuOpen(false)
-                    setDeleteOpen(true)
-                  }}
-                >
-                  <Trash2 className="size-4" /> Delete
-                </MenuItem>
-              </BoardMenu>
-            </div>
-          )}
+          <div className="relative">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-8"
+              hint="Board menu"
+              onClick={(e) => {
+                e.stopPropagation()
+                setMenuOpen((v) => !v)
+              }}
+            >
+              <Ellipsis />
+            </Button>
+            {menuOpen && (
+              <div onClick={(e) => e.stopPropagation()}>
+                <BoardMenu className="absolute right-0 top-full z-30 mt-1 min-w-[11rem] rounded-2xl bg-card p-1 shadow-card">
+                  <MenuItem
+                    onClick={() => {
+                      setMenuOpen(false)
+                      setPasswordOpen(true)
+                    }}
+                  >
+                    <KeyRound className="size-4" /> Password
+                  </MenuItem>
+                  <MenuItem
+                    onClick={() => {
+                      setMenuOpen(false)
+                      setHistoryOpen(true)
+                    }}
+                  >
+                    <History className="size-4" /> History
+                  </MenuItem>
+                  <MenuItem
+                    onClick={() => {
+                      setMenuOpen(false)
+                      withPrompt('Download board', async (password) => {
+                        await downloadBoard(boardMeta, password)
+                      })
+                    }}
+                  >
+                    <Download className="size-4" /> Download
+                  </MenuItem>
+                  <MenuItem
+                    onClick={() => {
+                      setMenuOpen(false)
+                      withPrompt('Archive board', async (password) => {
+                        await api.archiveBoard(boardId, password)
+                        nav('/')
+                      })
+                    }}
+                  >
+                    <Archive className="size-4" /> Archive
+                  </MenuItem>
+                  <MenuItem
+                    destructive
+                    onClick={() => {
+                      setMenuOpen(false)
+                      setDeleteOpen(true)
+                    }}
+                  >
+                    <Trash2 className="size-4" /> Delete
+                  </MenuItem>
+                </BoardMenu>
+              </div>
+            )}
+          </div>
         </div>
         <div className="pointer-events-auto flex h-14 items-center gap-1 rounded-3xl bg-card px-2 shadow-card">
           <div className="flex items-center -space-x-1.5 px-2">
@@ -488,6 +549,22 @@ function BoardSession({
             <span className="pl-2 pr-1 text-xs font-semibold text-muted-foreground">{user.name}</span>
           </div>
           <ThemeToggle />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-8"
+            hint={snapEnabled ? 'Snap on (toggle)' : 'Snap off (toggle)'}
+            data-active={snapEnabled}
+            onClick={() => {
+              setSnapEnabled((v) => {
+                writeSnapEnabled(!v)
+                return !v
+              })
+            }}
+          >
+            <Magnet />
+          </Button>
           <Button type="button" variant="ghost" hint="Chat" onClick={() => setChatOpen(!chatOpen)}>
             <MessageCircle /> Chat
           </Button>
@@ -519,8 +596,17 @@ function BoardSession({
             cursors={Object.values(session.cursors)}
             onCreate={(obj) => {
               session.createObject(obj)
-              if (obj.type !== 'connector' && obj.type !== 'sticker') setTool('select')
+              if (obj.type !== 'connector' && obj.type !== 'sticker' && tool !== 'mindmap') {
+                setTool('select')
+              }
               setSelectedIds([obj.id])
+            }}
+            onCreateMany={(objs) => {
+              session.withBatch(() => {
+                for (const o of objs) session.createObject(o)
+              })
+              const last = [...objs].reverse().find((o) => o.type !== 'connector')
+              if (last) setSelectedIds([last.id])
             }}
             onUpdate={session.updateObject}
             onLiveMove={(id, x, y) => {
@@ -533,6 +619,7 @@ function BoardSession({
             }}
             textStyle={typeStyle}
             stickerEmoji={stickerEmoji}
+            snapEnabled={snapEnabled}
           />
           {notice && (
             <div className="pointer-events-none absolute inset-x-0 top-4 z-20 flex justify-center">
@@ -622,6 +709,14 @@ function BoardSession({
           }}
         />
       )}
+      {embedOpen && (
+        <EmbedDialog
+          open
+          boardId={boardId}
+          boardName={boardMeta.name}
+          onClose={() => setEmbedOpen(false)}
+        />
+      )}
       {deleteOpen && (
         <DeleteBoardDialog
           open
@@ -640,6 +735,11 @@ function BoardSession({
           }}
         />
       )}
+      <HistoryPanel
+        open={historyOpen}
+        boardId={boardId}
+        onClose={() => setHistoryOpen(false)}
+      />
     </div>
   )
 }

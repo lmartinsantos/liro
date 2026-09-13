@@ -2,10 +2,11 @@
 #
 #   make dev     API + Vite with hot reload
 #   make run     serve the built SPA from the Go server
-#   make build   compile web/dist and bin/liro
+#   make build   compile web/dist, embed it, and bin/liro
 
 BIN := bin/liro
 WEB := web
+EMBED_DIST := internal/static/dist
 
 ADDR ?= :8080
 DATA ?= data
@@ -13,18 +14,21 @@ DATA ?= data
 export LIRO_ADDR ?= $(ADDR)
 export LIRO_DATA ?= $(DATA)
 
+VERSION := $(shell sed -n 's/^liro=//p' VERSIONS)
+LDFLAGS := -s -w -X main.version=$(VERSION)
+
 .DEFAULT_GOAL := help
 
 IMAGE ?= liro
 
-.PHONY: help deps build build-web build-server run server web dev test lint clean docker docker-run publish-github
+.PHONY: help deps build build-web build-server sync-embed embed-placeholder run server web dev test lint clean docker docker-run publish-github
 
 help:
 	@echo "Liro"
 	@echo
 	@echo "  make dev             API ($(ADDR)) + Vite (http://127.0.0.1:5173)"
 	@echo "  make run             build the SPA and serve it from the Go server"
-	@echo "  make build           build web/dist and $(BIN)"
+	@echo "  make build           build SPA, embed into $(BIN)"
 	@echo "  make server          API only"
 	@echo "  make web             Vite only"
 	@echo "  make test            Go tests"
@@ -46,11 +50,31 @@ $(WEB)/node_modules:
 build-web: $(WEB)/node_modules
 	npm --prefix $(WEB) run build
 
+sync-embed: build-web
+	rm -rf $(EMBED_DIST)
+	mkdir -p $(EMBED_DIST)
+	cp -a $(WEB)/dist/. $(EMBED_DIST)/
+
+embed-placeholder:
+	rm -rf $(EMBED_DIST)
+	mkdir -p $(EMBED_DIST)
+	printf '%s\n' \
+		'<!doctype html>' \
+		'<html lang="en">' \
+		'  <head>' \
+		'    <meta charset="utf-8" />' \
+		'    <title>liro</title>' \
+		'  </head>' \
+		'  <body>' \
+		'    <p>Build the SPA (<code>make build-web</code>) and rebuild to embed the UI.</p>' \
+		'  </body>' \
+		'</html>' > $(EMBED_DIST)/index.html
+
 build-server:
 	@mkdir -p $(dir $(BIN))
-	go build -o $(BIN) ./cmd/server
+	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o $(BIN) ./cmd/server
 
-build: build-web build-server
+build: sync-embed build-server
 
 server:
 	go run ./cmd/server
@@ -87,3 +111,4 @@ publish-github:
 
 clean:
 	rm -rf $(BIN) $(WEB)/dist
+	@$(MAKE) embed-placeholder

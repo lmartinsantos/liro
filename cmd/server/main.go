@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -12,18 +13,16 @@ import (
 
 	"liro/internal/api"
 	"liro/internal/hub"
+	"liro/internal/static"
 	"liro/internal/store"
 )
+
+// Set at link time: -ldflags "-X main.version=X.Y.Z"
+var version = "dev"
 
 func main() {
 	addr := env("LIRO_ADDR", ":8080")
 	dataDir := env("LIRO_DATA", "data")
-	static := env("LIRO_STATIC", "")
-	if static == "" {
-		if _, err := os.Stat("web/dist"); err == nil {
-			static = "web/dist"
-		}
-	}
 
 	abs, err := filepath.Abs(dataDir)
 	if err != nil {
@@ -35,7 +34,7 @@ func main() {
 	}
 
 	hubs := hub.NewRegistry(st)
-	handler := api.New(st, hubs, static)
+	handler := api.New(st, hubs, resolveStatic())
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -44,7 +43,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("liro listening on %s (data=%s mcp=/mcp)", addr, abs)
+		log.Printf("liro %s listening on %s (data=%s mcp=/mcp)", version, addr, abs)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal(err)
 		}
@@ -60,6 +59,16 @@ func main() {
 	hubs.Close()
 	st.Close()
 	log.Println("liro stopped")
+}
+
+func resolveStatic() fs.FS {
+	if v := os.Getenv("LIRO_STATIC"); v != "" {
+		return os.DirFS(v)
+	}
+	if st, err := os.Stat("web/dist"); err == nil && st.IsDir() {
+		return os.DirFS("web/dist")
+	}
+	return static.FS()
 }
 
 func env(key, fallback string) string {

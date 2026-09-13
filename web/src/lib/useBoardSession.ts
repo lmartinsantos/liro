@@ -15,6 +15,11 @@ import { getSessionId, newId, readUnlockToken } from './utils'
 
 type Inverse = Op
 
+type UndoStep = {
+  undo: Inverse[]
+  redo: Op[]
+}
+
 export function useBoardSession(boardId: string, user: User) {
   const [doc, setDoc] = useState<DocumentState>({ rev: 0, objects: {} })
   const [chat, setChat] = useState<ChatMessage[]>([])
@@ -25,7 +30,10 @@ export function useBoardSession(boardId: string, user: User) {
   const [connected, setConnected] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
   const pendingRef = useRef(new Set<string>())
-  const undoRef = useRef<Inverse[]>([])
+  const undoRef = useRef<UndoStep[]>([])
+  const redoRef = useRef<UndoStep[]>([])
+  const batchRef = useRef<UndoStep | null>(null)
+  const replayingRef = useRef(false)
   const objectsRef = useRef(doc.objects)
   objectsRef.current = doc.objects
 
@@ -36,17 +44,46 @@ export function useBoardSession(boardId: string, user: User) {
     }
   }, [])
 
+  const pushUndo = useCallback((step: UndoStep) => {
+    if (!step.undo.length) return
+    undoRef.current.push(step)
+    if (undoRef.current.length > 80) undoRef.current.shift()
+    if (!replayingRef.current) redoRef.current = []
+  }, [])
+
   const commitOp = useCallback(
     (op: Op, inverse?: Inverse) => {
       pendingRef.current.add(op.id)
       setDoc((d) => applyOp(d, op))
       send({ type: 'op', op })
-      if (inverse) {
-        undoRef.current.push(inverse)
-        if (undoRef.current.length > 80) undoRef.current.shift()
+      if (!inverse || replayingRef.current) return
+      const batch = batchRef.current
+      if (batch) {
+        batch.redo.push(op)
+        batch.undo.push(inverse)
+        return
+      }
+      pushUndo({ undo: [inverse], redo: [op] })
+    },
+    [pushUndo, send],
+  )
+
+  const withBatch = useCallback(
+    (fn: () => void) => {
+      if (batchRef.current) {
+        fn()
+        return
+      }
+      batchRef.current = { undo: [], redo: [] }
+      try {
+        fn()
+      } finally {
+        const step = batchRef.current
+        batchRef.current = null
+        if (step && step.undo.length) pushUndo(step)
       }
     },
-    [send],
+    [pushUndo],
   )
 
   const createObject = useCallback(
@@ -133,13 +170,34 @@ export function useBoardSession(boardId: string, user: User) {
     [commitOp, user.id],
   )
 
+  const applyHistoryOp = useCallback(
+    (template: Op) => {
+      const op: Op = { ...template, id: newId('op'), value: template.value }
+      pendingRef.current.add(op.id)
+      setDoc((d) => applyOp(d, op))
+      send({ type: 'op', op })
+    },
+    [send],
+  )
+
   const undo = useCallback(() => {
-    const inverse = undoRef.current.pop()
-    if (!inverse) return
-    pendingRef.current.add(inverse.id)
-    setDoc((d) => applyOp(d, inverse))
-    send({ type: 'op', op: inverse })
-  }, [send])
+    const step = undoRef.current.pop()
+    if (!step) return
+    replayingRef.current = true
+    for (const inv of [...step.undo].reverse()) applyHistoryOp(inv)
+    redoRef.current.push(step)
+    replayingRef.current = false
+  }, [applyHistoryOp])
+
+  const redo = useCallback(() => {
+    const step = redoRef.current.pop()
+    if (!step) return
+    replayingRef.current = true
+    for (const op of step.redo) applyHistoryOp(op)
+    undoRef.current.push(step)
+    if (undoRef.current.length > 80) undoRef.current.shift()
+    replayingRef.current = false
+  }, [applyHistoryOp])
 
   const sendCursor = useCallback(
     (x: number, y: number) => {
@@ -177,6 +235,8 @@ export function useBoardSession(boardId: string, user: User) {
         if (msg.meta) setMeta(msg.meta)
         if (msg.presence) setPresence(msg.presence)
         setReady(true)
+        undoRef.current = []
+        redoRef.current = []
       } else if (msg.type === 'op' && msg.op) {
         if (pendingRef.current.has(msg.op.id)) {
           pendingRef.current.delete(msg.op.id)
@@ -230,7 +290,9 @@ export function useBoardSession(boardId: string, user: User) {
     updateObject,
     updateObjectLive,
     deleteObject,
+    withBatch,
     undo,
+    redo,
     sendCursor,
     sendChat,
   }

@@ -296,6 +296,64 @@ func (s *Store) ListSnapshots(boardID string) ([]model.SnapshotInfo, error) {
 	return out, nil
 }
 
+// ForceSnapshot writes a snapshot of meta, board, and chat immediately.
+func (s *Store) ForceSnapshot(boardID string) (model.SnapshotInfo, error) {
+	rec, err := s.Get(boardID)
+	if err != nil {
+		return model.SnapshotInfo{}, err
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	now := time.Now()
+	kinds := []FileKind{FileMeta, FileBoard, FileChat}
+	if err := rec.snapshotLocked(now, kinds); err != nil {
+		return model.SnapshotInfo{}, err
+	}
+	return model.SnapshotInfo{
+		Timestamp: now.UnixMilli(),
+		Files:     []string{string(FileMeta), string(FileBoard), string(FileChat)},
+	}, nil
+}
+
+// RestoreSnapshot replaces the live board (and chat if present) from a snapshot.
+// Current state is snapshotted first so the restore is reversible.
+func (s *Store) RestoreSnapshot(boardID string, ts int64) error {
+	rec, err := s.Get(boardID)
+	if err != nil {
+		return err
+	}
+	boardPath := filepath.Join(rec.dir, "snapshots", fmt.Sprintf("%d__%s.json", ts, FileBoard))
+	if _, err := os.Stat(boardPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("snapshot not found")
+		}
+		return err
+	}
+	doc, err := readJSON[model.Document](boardPath)
+	if err != nil {
+		return err
+	}
+	var chat *model.ChatLog
+	chatPath := filepath.Join(rec.dir, "snapshots", fmt.Sprintf("%d__%s.json", ts, FileChat))
+	if data, err := readJSON[model.ChatLog](chatPath); err == nil {
+		chat = &data
+	}
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	now := time.Now()
+	if err := rec.snapshotLocked(now, []FileKind{FileMeta, FileBoard, FileChat}); err != nil {
+		return err
+	}
+	rec.Document = doc
+	if chat != nil {
+		rec.Chat = *chat
+	}
+	rec.MarkDirty(FileBoard)
+	rec.MarkDirty(FileChat)
+	return rec.writeWorking()
+}
+
 func newFileStates(now time.Time) map[FileKind]*fileState {
 	return map[FileKind]*fileState{
 		FileMeta:  {lastSnapshot: now, lastWrite: now},

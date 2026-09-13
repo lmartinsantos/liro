@@ -43,6 +43,30 @@ func TestPolygonPoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(tri.Points) < 6 {
+		t.Fatalf("triangle points: %+v", tri.Points)
+	}
+	hex, err := Build(Spec{Type: "hexagon", X: 0, Y: 0, W: 100, H: 80}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hex.Points) < 12 {
+		t.Fatalf("hexagon points: %+v", hex.Points)
+	}
+	cyl, err := Build(Spec{Type: "cylinder", X: 0, Y: 0, W: 80, H: 100}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cyl.W != 80 || cyl.H != 100 {
+		t.Fatalf("cylinder size: %+v", cyl)
+	}
+	rr, err := Build(Spec{Type: "roundrect", X: 0, Y: 0, W: 100, H: 80}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.CornerRadius <= 0 {
+		t.Fatalf("roundrect cornerRadius: %+v", rr)
+	}
 	want := TrianglePoints(10, 10)
 	if len(tri.Points) != len(want) || tri.Points[0] != want[0] || tri.Points[1] != want[1] {
 		t.Fatalf("triangle points: %+v", tri.Points)
@@ -88,7 +112,7 @@ func TestSceneAndSVG(t *testing.T) {
 }
 
 func TestUnknownType(t *testing.T) {
-	if _, err := Build(Spec{Type: "hexagon"}, nil); err == nil {
+	if _, err := Build(Spec{Type: "blob"}, nil); err == nil {
 		t.Fatal("expected error")
 	}
 }

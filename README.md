@@ -34,18 +34,20 @@ make dev
 
 ### Production-style local run
 
-Builds `web/dist` and serves it from the Go server:
+Builds `web/dist` and serves it from disk (or use `make build` for an embedded UI binary):
 
 ```bash
 make run
 ```
 
-Or build binaries once:
+Or build a self-contained binary (SPA embedded via `go:embed`):
 
 ```bash
-make build   # web/dist + bin/liro
+make build   # web/dist → internal/static/dist → bin/liro
 ./bin/liro
 ```
+
+Prebuilt multi-arch binaries are published on the GitHub Releases page for the version in [`VERSIONS`](VERSIONS). Each push to `main` on the GitHub mirror creates or replaces release `vX.Y.Z` (same version → substituted assets).
 
 ### Docker
 
@@ -56,15 +58,15 @@ make docker-run
 # docker run --rm -p 8080:8080 -v liro-data:/data liro
 ```
 
-Open `http://127.0.0.1:8080`.
+Open `http://127.0.0.1:8080`. The image binary embeds the SPA (no separate static volume).
 
 ## Configuration
 
-| Variable     | Default     | Meaning                          |
-|--------------|-------------|----------------------------------|
-| `LIRO_ADDR`  | `:8080`     | Listen address                   |
-| `LIRO_DATA`  | `data`      | On-disk board store              |
-| `LIRO_STATIC`| `web/dist`* | SPA directory (`*` if present)   |
+| Variable      | Default | Meaning |
+|---------------|---------|---------|
+| `LIRO_ADDR`   | `:8080` | Listen address |
+| `LIRO_DATA`   | `data`  | On-disk board store |
+| `LIRO_STATIC` | *(unset)* | Optional SPA directory override. If unset: use `web/dist` when present, otherwise the embedded UI. |
 
 Makefile shortcuts: `ADDR`, `DATA` (exported as the `LIRO_*` vars above).
 

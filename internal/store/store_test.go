@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"liro/internal/model"
 )
 
 var tinyPNG = []byte{
@@ -100,4 +102,53 @@ func TestCreateAndSnapshotPolicy(t *testing.T) {
 	if len(snaps2) != len(snaps) {
 		t.Fatal("should not snapshot immediately after a new edit")
 	}
+}
+
+func TestForceAndRestoreSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	st, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	rec, err := st.Create("History")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := rec.Meta.ID
+
+	rec.WithLock(func() {
+		rec.Document.Objects = map[string]model.Object{
+			"a": {ID: "a", Type: "rect", X: 10, Y: 20, W: 40, H: 30},
+		}
+		rec.Document.Rev = 3
+		rec.MarkDirty(FileBoard)
+	})
+	info, err := st.ForceSnapshot(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Timestamp == 0 {
+		t.Fatal("expected timestamp")
+	}
+
+	rec.WithLock(func() {
+		rec.Document.Objects = map[string]model.Object{
+			"b": {ID: "b", Type: "ellipse", X: 1, Y: 2, W: 10, H: 10},
+		}
+		rec.Document.Rev = 4
+		rec.MarkDirty(FileBoard)
+	})
+	if err := st.RestoreSnapshot(id, info.Timestamp); err != nil {
+		t.Fatal(err)
+	}
+	rec.WithLock(func() {
+		if _, ok := rec.Document.Objects["a"]; !ok {
+			t.Fatal("expected restored object a")
+		}
+		if _, ok := rec.Document.Objects["b"]; ok {
+			t.Fatal("object b should be gone after restore")
+		}
+	})
 }

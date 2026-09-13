@@ -31,8 +31,10 @@ Always `join_board` before any mutation. Mutating tools require the returned `us
 | Type | Default size | Notes |
 |---|---|---|
 | `rect` | 160×100 | fill `#93c5fd`, stroke `#1e2a4a` |
+| `roundrect` | 160×100 | same paints; `cornerRadius` defaults to 16 |
 | `ellipse` | 160×100 | same paints |
 | `triangle` / `diamond` / `arrow` | 160×120 | polygon `points` filled in for you |
+| `hexagon` / `parallelogram` / `cylinder` | 160×120 | flowchart shapes; cylinder is a standing side-elevation silhouette |
 | `postit` | 180×160 | yellow note; put copy in `text` |
 | `text` | 240×48 | ink fill, `fontSize` 20; put copy in `text` |
 | `sticker` | 64×64 | emoji object; put the emoji glyph in `text`; size tracks `w`/`h` |
@@ -43,7 +45,7 @@ Always `join_board` before any mutation. Mutating tools require the returned `us
 | `group` | around children | prefer `group_objects` |
 | `connector` | — | prefer `connect_objects`; orthogonal elbows between sides |
 
-`create_objects` needs `type` plus `x`/`y`. Omit `w`/`h` to use defaults. Optional: `text`, `fill`, `stroke`, `strokeWidth`, `points`, `parentId`, `dir`, `fontSize`, `bold`, `italic`, `textAlign`, `rotation`.
+`create_objects` needs `type` plus `x`/`y`. Omit `w`/`h` to use defaults. Optional: `text`, `fill`, `stroke`, `strokeWidth`, `cornerRadius`, `points`, `parentId`, `dir`, `fontSize`, `bold`, `italic`, `textAlign`, `rotation`.
 
 ## Hierarchy
 

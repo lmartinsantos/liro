@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -30,3 +33,106 @@ jobs:
       - name: Frontend build
         working-directory: web
         run: npm ci && npm run build
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build SPA and sync embed
+        run: |
+          npm ci --prefix web
+          npm run build --prefix web
+          rm -rf internal/static/dist
+          mkdir -p internal/static/dist
+          cp -a web/dist/. internal/static/dist/
+
+      - name: Cross-compile release binaries
+        id: build
+        run: |
+          set -euo pipefail
+          VERSION=$(sed -n 's/^liro=//p' VERSIONS)
+          TAG="v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+          LDFLAGS="-s -w -X main.version=${VERSION}"
+          OUT=release-assets
+          mkdir -p "$OUT"
+
+          build_one() {
+            local goos="$1" goarch="$2"
+            local ext="" name="liro"
+            if [ "$goos" = windows ]; then
+              ext=".exe"
+              name="liro.exe"
+            fi
+            local tmp
+            tmp=$(mktemp -d)
+            echo "Building ${goos}/${goarch}..."
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -trimpath -ldflags="$LDFLAGS" -o "${tmp}/${name}" ./cmd/server
+            local archive="liro_${TAG}_${goos}_${goarch}"
+            if [ "$goos" = windows ]; then
+              (cd "$tmp" && zip -q "${GITHUB_WORKSPACE}/${OUT}/${archive}.zip" "$name")
+            else
+              tar -C "$tmp" -czf "${OUT}/${archive}.tar.gz" "$name"
+            fi
+            rm -rf "$tmp"
+          }
+
+          build_one linux amd64
+          build_one linux arm64
+          build_one darwin amd64
+          build_one darwin arm64
+          build_one windows amd64
+          build_one windows arm64
+
+          (cd "$OUT" && sha256sum * > SHA256SUMS)
+
+      - name: Prepare release notes
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.build.outputs.version }}"
+          TAG="${{ steps.build.outputs.tag }}"
+          NOTES=$(mktemp)
+          if ./scripts/changelog-section.sh "$VERSION" > "$NOTES" && [ -s "$NOTES" ]; then
+            echo "Using CHANGELOG section for ${VERSION}"
+          else
+            {
+              echo "## ${TAG}"
+              echo
+              echo "Automated build from \`${GITHUB_SHA}\`."
+            } > "$NOTES"
+          fi
+          cp "$NOTES" release-notes.md
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.build.outputs.tag }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Replacing existing release ${TAG}"
+            gh release delete "$TAG" --yes --cleanup-tag
+          fi
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file release-notes.md \
+            --target "$GITHUB_SHA" \
+            release-assets/*

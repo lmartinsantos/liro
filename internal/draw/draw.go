@@ -26,39 +26,41 @@ const (
 )
 
 var validTypes = map[string]bool{
-	"rect": true, "ellipse": true, "line": true, "spline": true,
+	"rect": true, "roundrect": true, "ellipse": true, "line": true, "spline": true,
 	"postit": true, "triangle": true, "diamond": true, "arrow": true,
+	"hexagon": true, "parallelogram": true, "cylinder": true,
 	"text": true, "frame": true, "lane": true, "group": true,
 	"connector": true, "image": true, "sticker": true,
 }
 
 type Spec struct {
-	ID          string
-	Type        string
-	X           float64
-	Y           float64
-	W           float64
-	H           float64
-	Rotation    *float64
-	Fill        string
-	Stroke      string
-	StrokeWidth *float64
-	Points      []float64
-	Text        string
-	ParentID    string
-	FromID      string
-	ToID        string
-	FromSide    string
-	ToSide      string
-	FromOffset  *float64
-	ToOffset    *float64
-	Dir         string
-	Src         string
-	FontFamily  string
-	FontSize    *float64
-	Bold        *bool
-	Italic      *bool
-	TextAlign   string
+	ID           string
+	Type         string
+	X            float64
+	Y            float64
+	W            float64
+	H            float64
+	Rotation     *float64
+	Fill         string
+	Stroke       string
+	StrokeWidth  *float64
+	Points       []float64
+	Text         string
+	ParentID     string
+	FromID       string
+	ToID         string
+	FromSide     string
+	ToSide       string
+	FromOffset   *float64
+	ToOffset     *float64
+	Dir          string
+	Src          string
+	CornerRadius *float64
+	FontFamily   string
+	FontSize     *float64
+	Bold         *bool
+	Italic       *bool
+	TextAlign    string
 }
 
 type Box struct {
@@ -133,6 +135,19 @@ func ArrowPoints(w, h float64) []float64 {
 	}
 }
 
+func HexagonPoints(w, h float64) []float64 {
+	inset := w * 0.25
+	return []float64{inset, 0, w - inset, 0, w, h / 2, w - inset, h, inset, h, 0, h / 2}
+}
+
+func ParallelogramPoints(w, h float64) []float64 {
+	skew := w * 0.22
+	if skew > h*0.5 {
+		skew = h * 0.5
+	}
+	return []float64{skew, 0, w, 0, w - skew, h, 0, h}
+}
+
 func PolygonFor(typ string, w, h float64) []float64 {
 	switch typ {
 	case "triangle":
@@ -141,6 +156,10 @@ func PolygonFor(typ string, w, h float64) []float64 {
 		return DiamondPoints(w, h)
 	case "arrow":
 		return ArrowPoints(w, h)
+	case "hexagon":
+		return HexagonPoints(w, h)
+	case "parallelogram":
+		return ParallelogramPoints(w, h)
 	default:
 		return nil
 	}
@@ -189,6 +208,9 @@ func Build(spec Spec, objects map[string]model.Object) (model.Object, error) {
 	}
 	if spec.FontSize != nil {
 		obj.FontSize = *spec.FontSize
+	}
+	if spec.CornerRadius != nil {
+		obj.CornerRadius = *spec.CornerRadius
 	}
 
 	applyDefaults(&obj)
@@ -373,7 +395,8 @@ func applyDefaults(obj *model.Object) {
 			obj.W = 160
 		}
 		if obj.H == 0 {
-			if obj.Type == "triangle" || obj.Type == "diamond" || obj.Type == "arrow" {
+			if obj.Type == "triangle" || obj.Type == "diamond" || obj.Type == "arrow" ||
+				obj.Type == "hexagon" || obj.Type == "parallelogram" || obj.Type == "cylinder" {
 				obj.H = 120
 			} else {
 				obj.H = 100
@@ -387,6 +410,9 @@ func applyDefaults(obj *model.Object) {
 		}
 		if obj.StrokeWidth == 0 {
 			obj.StrokeWidth = DefaultStrokeWidth
+		}
+		if obj.Type == "roundrect" && obj.CornerRadius == 0 {
+			obj.CornerRadius = math.Min(16, math.Min(obj.W, obj.H)/2)
 		}
 		if poly := PolygonFor(obj.Type, obj.W, obj.H); poly != nil && len(obj.Points) == 0 {
 			obj.Points = poly

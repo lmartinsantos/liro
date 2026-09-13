@@ -1,6 +1,6 @@
 import type Konva from 'konva'
 import { useRef, useState } from 'react'
-import { Ellipse, Group, Line, Rect, Text } from 'react-konva'
+import { Circle, Ellipse, Group, Line, Rect, Shape, Text } from 'react-konva'
 import { arrowHeadPoints, polylineMidpoint, routeForConnector } from '@/lib/connectors'
 import { type CanvasTheme } from '@/lib/canvasTheme'
 import {
@@ -15,7 +15,7 @@ import {
 } from '@/lib/textStyle'
 import type { BoardObject } from '@/lib/types'
 import { BoardImage } from './BoardImage'
-import { polygonFor } from './shapeGeom'
+import { polygonFor, roundrectRadius } from './shapeGeom'
 
 type LivePos = Record<string, { x: number; y: number; w?: number; h?: number }>
 
@@ -24,6 +24,7 @@ type Props = {
   objects: Record<string, BoardObject>
   selected: boolean
   listening: boolean
+  draggable?: boolean
   theme: CanvasTheme
   editing?: boolean
   preview?: { x: number; y: number }
@@ -40,6 +41,7 @@ export function ObjectNode({
   objects,
   selected,
   listening,
+  draggable: draggableProp,
   theme,
   editing,
   preview,
@@ -56,10 +58,15 @@ export function ObjectNode({
   const noteBarRef = useRef<Konva.Rect>(null)
   const noteTextRef = useRef<Konva.Text>(null)
   // React mirror of live box so parent re-renders don't snap attrs; Konva is updated imperatively first.
-  const [noteBox, setNoteBox] = useState<{ x: number; y: number; w: number; h: number } | null>(null)
+	const [noteBox, setNoteBox] = useState<{ x: number; y: number; w: number; h: number } | null>(null)
+  const [liveCornerRadius, setLiveCornerRadius] = useState<number | null>(null)
   const path = obj.type === 'line' || obj.type === 'spline'
   const poly = polygonFor(obj.type, obj.w, obj.h)
-  const canDrag = listening && !editing && obj.type !== 'connector'
+  const canDrag = (draggableProp ?? listening) && !editing && obj.type !== 'connector'
+  const cornerR =
+    obj.type === 'roundrect'
+      ? (liveCornerRadius ?? roundrectRadius(obj.w, obj.h, obj.cornerRadius))
+      : 0
   const noteW = obj.type === 'postit' ? (noteBox?.w ?? obj.w) : obj.w
   const noteH = obj.type === 'postit' ? (noteBox?.h ?? obj.h) : obj.h
   const noteFont = displayNoteFontSize({
@@ -219,6 +226,57 @@ export function ObjectNode({
           strokeWidth={obj.strokeWidth}
         />
       )}
+      {obj.type === 'roundrect' && (
+        <>
+          <Rect
+            width={obj.w}
+            height={obj.h}
+            cornerRadius={cornerR}
+            fill={obj.fill}
+            stroke={obj.stroke}
+            strokeWidth={obj.strokeWidth}
+          />
+          {selected && listening && (
+            <Circle
+              x={cornerR}
+              y={0}
+              radius={7}
+              fill={theme.paper}
+              stroke={theme.select}
+              strokeWidth={1.5}
+              draggable
+              dragBoundFunc={(pos) => {
+                const max = Math.min(obj.w, obj.h) / 2
+                return { x: Math.max(0, Math.min(max, pos.x)), y: 0 }
+              }}
+              onMouseDown={(e) => {
+                e.cancelBubble = true
+              }}
+              onTouchStart={(e) => {
+                e.cancelBubble = true
+              }}
+              onDragStart={(e) => {
+                e.cancelBubble = true
+              }}
+              onDragMove={(e) => {
+                e.cancelBubble = true
+                const max = Math.min(obj.w, obj.h) / 2
+                const r = Math.max(0, Math.min(max, e.target.x()))
+                e.target.x(r)
+                e.target.y(0)
+                setLiveCornerRadius(r)
+              }}
+              onDragEnd={(e) => {
+                e.cancelBubble = true
+                const max = Math.min(obj.w, obj.h) / 2
+                const r = Math.max(0, Math.min(max, e.target.x()))
+                setLiveCornerRadius(null)
+                onChange(obj.id, { cornerRadius: r })
+              }}
+            />
+          )}
+        </>
+      )}
       {obj.type === 'ellipse' && (
         <Ellipse
           x={obj.w / 2}
@@ -230,6 +288,53 @@ export function ObjectNode({
           strokeWidth={obj.strokeWidth}
         />
       )}
+      {obj.type === 'cylinder' && (() => {
+        // Standing cylinder (side elevation): elliptical top cap, body, bottom front arc.
+        const ry = Math.min(obj.h * 0.16, obj.w * 0.22)
+        const rx = obj.w / 2
+        const topY = ry
+        const botY = obj.h - ry
+        return (
+          <>
+            <Rect
+              y={topY}
+              width={obj.w}
+              height={Math.max(4, botY - topY)}
+              fill={obj.fill}
+              strokeEnabled={false}
+            />
+            <Line
+              points={[0, topY, 0, botY]}
+              stroke={obj.stroke}
+              strokeWidth={obj.strokeWidth}
+            />
+            <Line
+              points={[obj.w, topY, obj.w, botY]}
+              stroke={obj.stroke}
+              strokeWidth={obj.strokeWidth}
+            />
+            <Shape
+              sceneFunc={(ctx, shape) => {
+                ctx.beginPath()
+                ctx.ellipse(rx, botY, rx, ry, 0, 0, Math.PI, false)
+                ctx.fillStrokeShape(shape)
+              }}
+              fill={obj.fill}
+              stroke={obj.stroke}
+              strokeWidth={obj.strokeWidth}
+            />
+            <Ellipse
+              x={rx}
+              y={topY}
+              radiusX={rx}
+              radiusY={ry}
+              fill={obj.fill}
+              stroke={obj.stroke}
+              strokeWidth={obj.strokeWidth}
+            />
+          </>
+        )
+      })()}
       {obj.type === 'postit' && (
         <>
           <Rect

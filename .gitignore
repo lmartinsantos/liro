@@ -1,6 +1,9 @@
 data/
 web/node_modules/
 web/dist/
+# Built SPA copied for go:embed; keep tracked placeholder index.html
+/internal/static/dist/**
+!/internal/static/dist/index.html
 .DS_Store
 *.exe
 tmp/

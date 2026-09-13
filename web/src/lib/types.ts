@@ -29,6 +29,7 @@ export type Attachment = {
 
 export type ObjectType =
   | 'rect'
+  | 'roundrect'
   | 'ellipse'
   | 'line'
   | 'spline'
@@ -36,6 +37,9 @@ export type ObjectType =
   | 'triangle'
   | 'diamond'
   | 'arrow'
+  | 'hexagon'
+  | 'parallelogram'
+  | 'cylinder'
   | 'text'
   | 'frame'
   | 'lane'
@@ -58,6 +62,8 @@ export type BoardObject = {
   fill: string
   stroke: string
   strokeWidth: number
+  /** Corner radius for roundrect (and optional future rounded shapes). */
+  cornerRadius?: number
   points?: number[]
   text?: string
   attachments?: Attachment[]
@@ -115,6 +121,7 @@ export type Op = {
 export type Tool =
   | 'select'
   | 'rect'
+  | 'roundrect'
   | 'ellipse'
   | 'line'
   | 'spline'
@@ -122,11 +129,15 @@ export type Tool =
   | 'triangle'
   | 'diamond'
   | 'arrow'
+  | 'hexagon'
+  | 'parallelogram'
+  | 'cylinder'
   | 'text'
   | 'connector'
   | 'frame'
   | 'lane'
   | 'sticker'
+  | 'mindmap'
 
 export type RemoteCursor = {
   sessionId: string

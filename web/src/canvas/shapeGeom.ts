@@ -27,10 +27,24 @@ export function arrowPoints(w: number, h: number) {
   ]
 }
 
+/** Flat-top hexagon. */
+export function hexagonPoints(w: number, h: number) {
+  const inset = w * 0.25
+  return [inset, 0, w - inset, 0, w, h / 2, w - inset, h, inset, h, 0, h / 2]
+}
+
+/** Parallelogram (flowchart input/output). */
+export function parallelogramPoints(w: number, h: number) {
+  const skew = Math.min(w * 0.22, h * 0.5)
+  return [skew, 0, w, 0, w - skew, h, 0, h]
+}
+
 export function polygonFor(type: ObjectType, w: number, h: number) {
   if (type === 'triangle') return trianglePoints(w, h)
   if (type === 'diamond') return diamondPoints(w, h)
   if (type === 'arrow') return arrowPoints(w, h)
+  if (type === 'hexagon') return hexagonPoints(w, h)
+  if (type === 'parallelogram') return parallelogramPoints(w, h)
   return null
 }
 
@@ -41,6 +55,7 @@ export function isPathType(type: ObjectType) {
 export function isDrawTool(type: string) {
   return (
     type === 'rect' ||
+    type === 'roundrect' ||
     type === 'ellipse' ||
     type === 'line' ||
     type === 'spline' ||
@@ -48,13 +63,29 @@ export function isDrawTool(type: string) {
     type === 'triangle' ||
     type === 'diamond' ||
     type === 'arrow' ||
+    type === 'hexagon' ||
+    type === 'parallelogram' ||
+    type === 'cylinder' ||
     type === 'frame' ||
     type === 'lane'
   )
 }
 
+/** Default / clamped corner radius for roundrect. */
+export function roundrectRadius(w: number, h: number, cornerRadius?: number) {
+  const max = Math.max(0, Math.min(w, h) / 2)
+  if (cornerRadius == null || Number.isNaN(cornerRadius)) return Math.min(16, max)
+  return Math.max(0, Math.min(cornerRadius, max))
+}
+
 export function isPolygonType(type: ObjectType) {
-  return type === 'triangle' || type === 'diamond' || type === 'arrow'
+  return (
+    type === 'triangle' ||
+    type === 'diamond' ||
+    type === 'arrow' ||
+    type === 'hexagon' ||
+    type === 'parallelogram'
+  )
 }
 
 export function normalizeBox(x0: number, y0: number, x1: number, y1: number) {
@@ -96,13 +127,15 @@ export function objectFromDraft(
   extras: Pick<BoardObject, 'id' | 'z' | 'fill' | 'stroke' | 'strokeWidth' | 'text'> &
     Partial<Pick<BoardObject, 'parentId' | 'dir' | 'fontFamily' | 'fontSize' | 'bold' | 'italic' | 'textAlign'>>,
 ): BoardObject {
+  const w = Math.max(draft.w, 4)
+  const h = Math.max(draft.h, 4)
   return {
     id: extras.id,
     type: draft.type,
     x: draft.x,
     y: draft.y,
-    w: Math.max(draft.w, 4),
-    h: Math.max(draft.h, 4),
+    w,
+    h,
     rotation: 0,
     z: extras.z,
     fill: extras.fill,
@@ -118,5 +151,6 @@ export function objectFromDraft(
     bold: extras.bold,
     italic: extras.italic,
     textAlign: extras.textAlign,
+    cornerRadius: draft.type === 'roundrect' ? roundrectRadius(w, h) : undefined,
   }
 }

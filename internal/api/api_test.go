@@ -29,7 +29,7 @@ func TestBoardJoinAndOp(t *testing.T) {
 	t.Cleanup(st.Close)
 	hubs := hub.NewRegistry(st)
 	t.Cleanup(hubs.Close)
-	srv := httptest.NewServer(New(st, hubs, ""))
+	srv := httptest.NewServer(New(st, hubs, nil))
 	t.Cleanup(srv.Close)
 
 	res, err := http.Post(srv.URL+"/api/boards", "application/json", strings.NewReader(`{"name":"Room"}`))
@@ -121,7 +121,7 @@ func TestUploadAndGetAsset(t *testing.T) {
 	t.Cleanup(st.Close)
 	hubs := hub.NewRegistry(st)
 	t.Cleanup(hubs.Close)
-	srv := httptest.NewServer(New(st, hubs, ""))
+	srv := httptest.NewServer(New(st, hubs, nil))
 	t.Cleanup(srv.Close)
 
 	res, err := http.Post(srv.URL+"/api/boards", "application/json", strings.NewReader(`{"name":"Pics"}`))
@@ -209,6 +209,108 @@ func TestUploadAndGetAsset(t *testing.T) {
 	}
 }
 
+func TestGetDocument(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	hubs := hub.NewRegistry(st)
+	t.Cleanup(hubs.Close)
+	srv := httptest.NewServer(New(st, hubs, nil))
+	t.Cleanup(srv.Close)
+
+	res, err := http.Post(srv.URL+"/api/boards", "application/json", strings.NewReader(`{"name":"View"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta model.Meta
+	if err := json.NewDecoder(res.Body).Decode(&meta); err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+
+	rec, err := st.Get(meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.WithLock(func() {
+		rec.Document.Objects["obj_1"] = model.Object{ID: "obj_1", Type: "rect", X: 10, Y: 20, W: 40, H: 30}
+		rec.Document.Rev = 1
+		rec.MarkDirty(store.FileBoard)
+	})
+
+	res, err = http.Get(srv.URL + "/api/boards/" + meta.ID + "/document")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("document status %d", res.StatusCode)
+	}
+	var out struct {
+		Meta     model.Meta     `json:"meta"`
+		Document model.Document `json:"document"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if out.Meta.Name != "View" || out.Document.Objects["obj_1"].Type != "rect" {
+		t.Fatalf("unexpected document payload: %+v", out)
+	}
+
+	body, _ := json.Marshal(map[string]string{"password": "", "newPassword": "secret"})
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/boards/"+meta.ID+"/password", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("set password status %d", res.StatusCode)
+	}
+
+	res, err = http.Get(srv.URL + "/api/boards/" + meta.ID + "/document")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized without unlock, got %d", res.StatusCode)
+	}
+
+	res, err = http.Post(srv.URL+"/api/boards/"+meta.ID+"/unlock", "application/json", strings.NewReader(`{"password":"secret"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unlock struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&unlock); err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+
+	req, err = http.NewRequest(http.MethodGet, srv.URL+"/api/boards/"+meta.ID+"/document", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Board-Unlock", unlock.Token)
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("document with unlock status %d", res.StatusCode)
+	}
+	_ = res.Body.Close()
+}
+
 func TestMCPInitialize(t *testing.T) {
 	dir := t.TempDir()
 	st, err := store.New(dir)
@@ -218,7 +320,7 @@ func TestMCPInitialize(t *testing.T) {
 	t.Cleanup(st.Close)
 	hubs := hub.NewRegistry(st)
 	t.Cleanup(hubs.Close)
-	srv := httptest.NewServer(New(st, hubs, ""))
+	srv := httptest.NewServer(New(st, hubs, nil))
 	t.Cleanup(srv.Close)
 
 	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`

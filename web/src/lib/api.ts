@@ -1,4 +1,4 @@
-import type { Meta, SnapshotInfo, User } from './types'
+import type { DocumentState, Meta, SnapshotInfo, User } from './types'
 import { readUnlockToken, writeUnlockToken } from './utils'
 
 export type UploadedAsset = {
@@ -133,6 +133,34 @@ export const api = {
       body: JSON.stringify({ name }),
     }),
   listSnapshots: (id: string) => req<SnapshotInfo[]>(`/api/boards/${id}/snapshots`, { boardId: id }),
+  createSnapshot: (id: string, password?: string) =>
+    req<SnapshotInfo>(`/api/boards/${id}/snapshots`, {
+      method: 'POST',
+      boardId: id,
+      body: JSON.stringify(password ? { password } : {}),
+    }),
+  restoreSnapshot: async (id: string, ts: number, password?: string) => {
+    const headers = { ...unlockHeaders(id), 'Content-Type': 'application/json' } as Record<string, string>
+    const res = await fetch(`/api/boards/${id}/snapshots/${ts}/restore`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(password ? { password } : {}),
+    })
+    if (!res.ok) {
+      let msg = res.statusText
+      try {
+        const data = (await res.json()) as { error?: string }
+        if (data.error) msg = data.error
+      } catch {
+        /* ignore */
+      }
+      throw new Error(msg)
+    }
+  },
+  getDocument: (id: string) =>
+    req<{ meta: Meta; document: DocumentState }>(`/api/boards/${id}/document`, {
+      boardId: id,
+    }),
   uploadAsset: async (boardId: string, file: File) => {
     const body = new FormData()
     body.append('file', file)

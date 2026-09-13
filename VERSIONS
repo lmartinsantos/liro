@@ -2,6 +2,6 @@
 # Bump `liro` when cutting a release. Keep toolchain pins aligned with
 # .gitlab-ci.yml, Dockerfile, and go.mod.
 
-liro=0.1.0
+liro=0.2.0
 go=1.25
 node=22

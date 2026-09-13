@@ -1,6 +1,6 @@
 import type Konva from 'konva'
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
-import { Layer, Line, Rect, Stage, Transformer } from 'react-konva'
+import { Ellipse, Layer, Line, Rect, Stage, Transformer } from 'react-konva'
 import {
   connectorBounds,
   nearestPort,
@@ -19,6 +19,7 @@ import {
   objectAABB,
   parentAfterMove,
   renderOrder,
+  unionBoxes,
 } from '@/lib/ops'
 import { DEFAULT_FILL, useCanvasTheme } from '@/lib/canvasTheme'
 import {
@@ -33,6 +34,8 @@ import {
   titleFontSize,
 } from '@/lib/textStyle'
 import { imageFilesFromDataTransfer } from '@/lib/images'
+import { buildMindmapChild, buildMindmapRoot } from '@/lib/mindmap'
+import { GRID_SIZE, type Guide, readSnapEnabled, snapBox, snapResizeBox } from '@/lib/snap'
 import type { BoardObject, ObjectType, RemoteCursor, Side, Tool } from '@/lib/types'
 import { newId } from '@/lib/utils'
 import { AttachmentsLayer } from './AttachmentsLayer'
@@ -51,6 +54,7 @@ type Props = {
   strokeWidth: number
   cursors: RemoteCursor[]
   onCreate: (obj: BoardObject) => void
+  onCreateMany?: (objs: BoardObject[]) => void
   onUpdate: (id: string, path: string, value: unknown) => void
   onLiveMove: (id: string, x: number, y: number) => void
   onCursor: (x: number, y: number) => void
@@ -63,10 +67,14 @@ type Props = {
     textAlign?: 'left' | 'center' | 'right'
   }
   stickerEmoji?: string
+  snapEnabled?: boolean
+  /** Pan/zoom only — no select, edit, or create. */
+  readOnly?: boolean
 }
 
 export type BoardCanvasHandle = {
   viewCenter: () => { x: number; y: number }
+  fitObjects: (objects: Record<string, BoardObject>, pad?: number) => void
 }
 
 const MIN_SCALE = 0.12
@@ -83,12 +91,15 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
     strokeWidth,
     cursors,
     onCreate,
+    onCreateMany,
     onUpdate,
     onLiveMove,
     onCursor,
     onImages,
     textStyle,
     stickerEmoji = '🔥',
+    snapEnabled: snapEnabledProp,
+    readOnly = false,
   },
   ref,
 ) {
@@ -101,6 +112,10 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
   const [scale, setScale] = useState(1)
   const [space, setSpace] = useState(false)
   const [panning, setPanning] = useState(false)
+  const [guides, setGuides] = useState<Guide[]>([])
+  const snapEnabled = snapEnabledProp ?? readSnapEnabled()
+  const snapEnabledRef = useRef(snapEnabled)
+  snapEnabledRef.current = snapEnabled
   const panRef = useRef<{ x: number; y: number; px: number; py: number } | null>(null)
   const dragStart = useRef<{ x: number; y: number } | null>(null)
   const [draft, setDraft] = useState<Draft | null>(null)
@@ -170,7 +185,7 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
     const stage = stageRef.current
     const tr = trRef.current
     if (!stage || !tr) return
-    if (!selectedIds.length || tool !== 'select' || editing) {
+    if (readOnly || !selectedIds.length || tool !== 'select' || editing) {
       tr.nodes([])
       return
     }
@@ -182,7 +197,7 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
     })
     tr.nodes(nodes)
     tr.getLayer()?.batchDraw()
-  }, [selectedIds, objects, tool, editing])
+  }, [selectedIds, objects, tool, editing, readOnly])
 
   const view = useMemo(
     () => ({
@@ -201,8 +216,25 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
         x: view.x + view.w / 2,
         y: view.y + view.h / 2,
       }),
+      fitObjects: (objs, pad = 48) => {
+        const boxes = Object.values(objs)
+          .filter((o) => o.type !== 'connector')
+          .map((o) => objectAABB(o))
+        if (!boxes.length || size.w < 8 || size.h < 8) return
+        const box = unionBoxes(boxes)
+        const next = clamp(
+          Math.min((size.w - pad * 2) / box.w, (size.h - pad * 2) / box.h),
+          MIN_SCALE,
+          MAX_SCALE,
+        )
+        setScale(next)
+        setPos({
+          x: size.w / 2 - (box.x + box.w / 2) * next,
+          y: size.h / 2 - (box.y + box.h / 2) * next,
+        })
+      },
     }),
-    [view],
+    [view, size.w, size.h],
   )
 
   const visible = useMemo(() => {
@@ -508,7 +540,38 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
     onSelect([id])
   }
 
+  const placeMindmap = (pt: { x: number; y: number }) => {
+    const parentId = selectedRef.current.length === 1 ? selectedRef.current[0] : null
+    const parent = parentId ? objects[parentId] : null
+    const noteFill = fill === DEFAULT_FILL ? '#fde68a' : fill
+    if (parent && parent.type !== 'connector') {
+      const { node, connector } = buildMindmapChild({
+        parent,
+        objects,
+        fill: noteFill,
+        stroke,
+      })
+      if (onCreateMany) onCreateMany([node, connector])
+      else {
+        onCreate(node)
+        onCreate(connector)
+      }
+      onSelect([node.id])
+      return
+    }
+    const root = buildMindmapRoot({
+      x: pt.x,
+      y: pt.y,
+      objects,
+      fill: noteFill,
+      stroke,
+    })
+    onCreate(root)
+    onSelect([root.id])
+  }
+
   useEffect(() => {
+    if (readOnly) return
     const onKey = (e: KeyboardEvent) => {
       if (isTyping(e)) return
       if (e.key === 'Enter' && splinePts) {
@@ -537,7 +600,7 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [splinePts, onSelect, objects, stroke, strokeWidth, editing, tool, selectedIds])
+  }, [splinePts, onSelect, objects, stroke, strokeWidth, editing, tool, selectedIds, readOnly])
 
   const onWheel = (e: Konva.KonvaEventObject<WheelEvent>) => {
     e.evt.preventDefault()
@@ -562,7 +625,7 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
     const pt = pointerBoard()
     if (!pt) return
     const middle = e.evt.button === 1
-    if (space || middle) {
+    if (readOnly || space || middle) {
       setPanning(true)
       panRef.current = { x: pos.x, y: pos.y, px: e.evt.clientX, py: e.evt.clientY }
       return
@@ -573,6 +636,10 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
     }
     if (tool === 'sticker') {
       placeSticker(pt)
+      return
+    }
+    if (tool === 'mindmap') {
+      if (e.target === e.target.getStage()) placeMindmap(pt)
       return
     }
     if (tool === 'connector') {
@@ -598,7 +665,7 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
 
   const onMouseMove = (e: Konva.KonvaEventObject<MouseEvent>) => {
     const pt = pointerBoard()
-    if (pt) {
+    if (pt && !readOnly) {
       emitCursor(pt)
       setHoverPt(pt)
       if (tool === 'connector') {
@@ -615,6 +682,7 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
       })
       return
     }
+    if (readOnly) return
     if (marquee && dragStart.current && pt) {
       setMarquee({
         x: Math.min(dragStart.current.x, pt.x),
@@ -656,6 +724,7 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
   }
 
   const onDblClick = () => {
+    if (readOnly) return
     if (splinePts) commitSpline(splinePts)
   }
 
@@ -670,10 +739,16 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
   const handleChange = (id: string, patch: Partial<BoardObject>) => {
     if ('x' in patch && 'y' in patch && !('w' in patch)) {
       const origin = moveOrigin.current[id] ?? { x: objects[id]?.x ?? 0, y: objects[id]?.y ?? 0 }
-      const dx = (patch.x ?? 0) - origin.x
-      const dy = (patch.y ?? 0) - origin.y
+      const dragged = objects[id]
+      const raw = { x: patch.x ?? 0, y: patch.y ?? 0 }
       const ids = movingIds(id)
       const exclude = new Set(ids)
+      const snapped = snapBox(
+        { x: raw.x, y: raw.y, w: dragged?.w ?? 1, h: dragged?.h ?? 1 },
+        { enabled: snapEnabledRef.current, objects, exclude, grid: GRID_SIZE },
+      )
+      const dx = snapped.x - origin.x
+      const dy = snapped.y - origin.y
       for (const mid of ids) {
         const start = moveOrigin.current[mid] ?? { x: objects[mid]?.x ?? 0, y: objects[mid]?.y ?? 0 }
         const nx = start.x + dx
@@ -688,6 +763,26 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
       moveOrigin.current = {}
       draggingId.current = null
       setLivePos({})
+      setGuides([])
+      return
+    }
+    if ('x' in patch && 'y' in patch && ('w' in patch || 'h' in patch)) {
+      const exclude = new Set([id])
+      const snapped = snapResizeBox(
+        {
+          x: patch.x ?? objects[id]?.x ?? 0,
+          y: patch.y ?? objects[id]?.y ?? 0,
+          w: patch.w ?? objects[id]?.w ?? 8,
+          h: patch.h ?? objects[id]?.h ?? 8,
+        },
+        { enabled: snapEnabledRef.current, objects, exclude, grid: GRID_SIZE },
+      )
+      onUpdate(id, 'x', snapped.box.x)
+      onUpdate(id, 'y', snapped.box.y)
+      onUpdate(id, 'w', snapped.box.w)
+      onUpdate(id, 'h', snapped.box.h)
+      if ('rotation' in patch) onUpdate(id, 'rotation', patch.rotation)
+      setGuides([])
       return
     }
     for (const [k, v] of Object.entries(patch)) {
@@ -704,19 +799,24 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
       }
     }
     const origin = moveOrigin.current[id] ?? { x: objects[id]?.x ?? 0, y: objects[id]?.y ?? 0 }
-    const dx = x - origin.x
-    const dy = y - origin.y
+    const dragged = objects[id]
     const ids = movingIds(id)
+    const exclude = new Set(ids)
+    const snapped = snapBox(
+      { x, y, w: dragged?.w ?? 1, h: dragged?.h ?? 1 },
+      { enabled: snapEnabledRef.current, objects, exclude, grid: GRID_SIZE },
+    )
+    setGuides(snapped.guides)
+    const dx = snapped.x - origin.x
+    const dy = snapped.y - origin.y
     const preview: Record<string, { x: number; y: number }> = {}
     const stage = stageRef.current
     for (const mid of ids) {
       const start = moveOrigin.current[mid] ?? { x: objects[mid]?.x ?? 0, y: objects[mid]?.y ?? 0 }
       const next = { x: start.x + dx, y: start.y + dy }
       preview[mid] = next
-      if (mid !== id) {
-        const node = stage?.findOne('#' + mid)
-        node?.position(next)
-      }
+      const node = stage?.findOne('#' + mid)
+      node?.position(next)
     }
     setLivePos(preview)
     refreshTransformer()
@@ -805,8 +905,9 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
       }
     : null
 
-  const gridSize = 32 * scale
+  const gridSize = GRID_SIZE * scale
   const gridPos = `${pos.x}px ${pos.y}px`
+  const guideSpan = Math.max(view.w, view.h) * 2
   const fromObj = connectFrom ? resolveEndpoint(objects, connectFrom.id, livePos) : null
   const selectedConnectorId =
     selectedId && objects[selectedId]?.type === 'connector' ? selectedId : null
@@ -832,20 +933,21 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
       ref={wrapRef}
       className="relative h-full w-full overflow-hidden"
       style={{
-        cursor: space || panning ? 'grab' : tool === 'select' ? 'default' : 'crosshair',
+        cursor: readOnly || space || panning ? 'grab' : tool === 'select' ? 'default' : 'crosshair',
         backgroundColor: theme.bg,
         backgroundImage: `radial-gradient(${theme.grid} 1px, transparent 1px)`,
         backgroundSize: `${gridSize}px ${gridSize}px`,
         backgroundPosition: gridPos,
       }}
       onDragOver={(e) => {
+        if (readOnly || !onImages) return
         if (e.dataTransfer && [...e.dataTransfer.types].includes('Files')) {
           e.preventDefault()
           e.dataTransfer.dropEffect = 'copy'
         }
       }}
       onDrop={(e) => {
-        if (!onImages) return
+        if (readOnly || !onImages) return
         const files = imageFilesFromDataTransfer(e.dataTransfer)
         if (!files.length) return
         e.preventDefault()
@@ -876,7 +978,14 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
               obj={obj}
               objects={objects}
               selected={selectedIds.includes(obj.id)}
-              listening={tool === 'select' || tool === 'connector' ? !space && !editing : false}
+              listening={
+                readOnly
+                  ? false
+                  : tool === 'select' || tool === 'connector' || tool === 'mindmap'
+                    ? !space && !editing
+                    : false
+              }
+              draggable={!readOnly && tool === 'select' && !space && !editing}
               theme={theme}
               editing={editing === obj.id}
               preview={draggingId.current === obj.id ? undefined : livePos[obj.id]}
@@ -921,7 +1030,7 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
               listening={false}
             />
           )}
-          {fromObj && connectFrom && hoverPt && (
+          {fromObj && connectFrom && hoverPt && !readOnly && (
             <ConnectorPreview
               from={fromObj}
               fromSide={connectFrom.side}
@@ -931,19 +1040,21 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
               theme={theme}
             />
           )}
-          <ConnectorOverlay
-            objects={objects}
-            livePos={livePos}
-            theme={theme}
-            scale={scale}
-            tool={tool}
-            portShapeIds={portShapeIds}
-            connectFrom={connectFrom}
-            selectedConnectorId={tool === 'select' ? selectedConnectorId : null}
-            onPortClick={pickPort}
-            onUpdate={onUpdate}
-            onRewire={rewireConnector}
-          />
+          {!readOnly && (
+            <ConnectorOverlay
+              objects={objects}
+              livePos={livePos}
+              theme={theme}
+              scale={scale}
+              tool={tool}
+              portShapeIds={portShapeIds}
+              connectFrom={connectFrom}
+              selectedConnectorId={tool === 'select' ? selectedConnectorId : null}
+              onPortClick={pickPort}
+              onUpdate={onUpdate}
+              onRewire={rewireConnector}
+            />
+          )}
           <Transformer
             ref={trRef}
             rotateEnabled={!multiSelect}
@@ -958,12 +1069,51 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
             }
             boundBoxFunc={(_old, box) => {
               if (box.width < 8 || box.height < 8) return _old
-              return box
+              if (!snapEnabledRef.current || !selectedId) return box
+              const snapped = snapResizeBox(
+                { x: box.x, y: box.y, w: box.width, h: box.height },
+                {
+                  enabled: true,
+                  objects,
+                  exclude: new Set([selectedId]),
+                  grid: GRID_SIZE,
+                },
+              )
+              setGuides(snapped.guides)
+              return {
+                ...box,
+                x: snapped.box.x,
+                y: snapped.box.y,
+                width: snapped.box.w,
+                height: snapped.box.h,
+              }
             }}
+            onTransformEnd={() => setGuides([])}
             borderStroke={theme.select}
             anchorStroke={theme.select}
             anchorFill={theme.paper}
           />
+          {guides.map((g, i) =>
+            g.orientation === 'v' ? (
+              <Line
+                key={`g-v-${i}-${g.position}`}
+                points={[g.position, view.y - guideSpan, g.position, view.y + view.h + guideSpan]}
+                stroke={theme.select}
+                strokeWidth={Math.max(1, 1 / scale)}
+                dash={[6 / scale, 4 / scale]}
+                listening={false}
+              />
+            ) : (
+              <Line
+                key={`g-h-${i}-${g.position}`}
+                points={[view.x - guideSpan, g.position, view.x + view.w + guideSpan, g.position]}
+                stroke={theme.select}
+                strokeWidth={Math.max(1, 1 / scale)}
+                dash={[6 / scale, 4 / scale]}
+                listening={false}
+              />
+            ),
+          )}
         </Layer>
         <Layer listening={false}>
           <AttachmentsLayer objects={visible} theme={theme} />
@@ -1063,6 +1213,79 @@ function DraftNode({
         opacity={0.85}
         listening={false}
       />
+    )
+  }
+  if (draft.type === 'roundrect') {
+    const r = Math.min(16, Math.min(draft.w, draft.h) / 2)
+    return (
+      <Rect
+        x={draft.x}
+        y={draft.y}
+        width={draft.w}
+        height={draft.h}
+        cornerRadius={r}
+        fill={fill}
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        opacity={0.85}
+        listening={false}
+      />
+    )
+  }
+  if (draft.type === 'cylinder') {
+    const ry = Math.min(draft.h * 0.16, draft.w * 0.22)
+    const rx = draft.w / 2
+    const topY = draft.y + ry
+    const botY = draft.y + draft.h - ry
+    return (
+      <>
+        <Rect
+          x={draft.x}
+          y={topY}
+          width={draft.w}
+          height={Math.max(4, botY - topY)}
+          fill={fill}
+          strokeEnabled={false}
+          opacity={0.85}
+          listening={false}
+        />
+        <Ellipse
+          x={draft.x + rx}
+          y={botY}
+          radiusX={rx}
+          radiusY={ry}
+          fill={fill}
+          stroke={stroke}
+          strokeWidth={strokeWidth}
+          opacity={0.85}
+          listening={false}
+        />
+        <Ellipse
+          x={draft.x + rx}
+          y={topY}
+          radiusX={rx}
+          radiusY={ry}
+          fill={fill}
+          stroke={stroke}
+          strokeWidth={strokeWidth}
+          opacity={0.85}
+          listening={false}
+        />
+        <Line
+          points={[draft.x, topY, draft.x, botY]}
+          stroke={stroke}
+          strokeWidth={strokeWidth}
+          opacity={0.85}
+          listening={false}
+        />
+        <Line
+          points={[draft.x + draft.w, topY, draft.x + draft.w, botY]}
+          stroke={stroke}
+          strokeWidth={strokeWidth}
+          opacity={0.85}
+          listening={false}
+        />
+      </>
     )
   }
   return (
