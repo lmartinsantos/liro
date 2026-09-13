@@ -16,11 +16,42 @@ Liro is a self-hosted collaborative whiteboard.
 
 ## Requirements
 
-- Go **1.25+** (see `go.mod` and `VERSIONS`)
-- Node.js **22+** (frontend build)
+- To **run** a release binary or Docker image: nothing else
+- To **build from source**: Go **1.25+** and Node.js **22+** (see `go.mod` and `VERSIONS`)
 - Optional: Docker
 
 ## Quick start
+
+One binary serves the API, WebSocket, MCP, and the UI. Open `http://127.0.0.1:8080`. Board data lives in `./data` by default (`LIRO_DATA`).
+
+### Prebuilt binary
+
+Download a multi-arch binary from the GitHub Releases page for the version in [`VERSIONS`](VERSIONS). Each push to `main` on the GitHub mirror creates or replaces release `vX.Y.Z` (same version → substituted assets).
+
+```bash
+./liro
+```
+
+No Node.js and no `web/dist` directory — the SPA is compiled into the binary.
+
+### Build from source
+
+```bash
+make deps
+make build   # Vite SPA → embed → bin/liro
+./bin/liro
+```
+
+### Docker
+
+```bash
+make docker-run
+# equivalent:
+# docker build -t liro .
+# docker run --rm -p 8080:8080 -v liro-data:/data liro
+```
+
+The image binary embeds the SPA (no separate static volume).
 
 ### Development (API + Vite HMR)
 
@@ -32,33 +63,7 @@ make dev
 - API: `http://127.0.0.1:8080`
 - UI: `http://127.0.0.1:5173`
 
-### Production-style local run
-
-Builds `web/dist` and serves it from disk (or use `make build` for an embedded UI binary):
-
-```bash
-make run
-```
-
-Or build a self-contained binary (SPA embedded via `go:embed`):
-
-```bash
-make build   # web/dist → internal/static/dist → bin/liro
-./bin/liro
-```
-
-Prebuilt multi-arch binaries are published on the GitHub Releases page for the version in [`VERSIONS`](VERSIONS). Each push to `main` on the GitHub mirror creates or replaces release `vX.Y.Z` (same version → substituted assets).
-
-### Docker
-
-```bash
-make docker-run
-# equivalent:
-# docker build -t liro .
-# docker run --rm -p 8080:8080 -v liro-data:/data liro
-```
-
-Open `http://127.0.0.1:8080`. The image binary embeds the SPA (no separate static volume).
+`make run` builds the SPA to `web/dist` and starts the Go server without writing `bin/liro`. If `web/dist` exists in the working directory, that copy is served instead of the embedded UI.
 
 ## Configuration
 
