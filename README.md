@@ -1,5 +1,7 @@
 # Liro
 
+![Liro Screenshot](assets/screenshot.png)
+
 Liro is a self-hosted collaborative whiteboard. 
 
 **Current release:** see [`VERSIONS`](VERSIONS) · **changes:** [`CHANGELOG.md`](CHANGELOG.md) · **license:** [GPL-2.0](LICENSE)
