@@ -1,0 +1,10 @@
+data/
+web/node_modules/
+web/dist/
+.DS_Store
+*.exe
+tmp/
+bin/
+/liro
+.go/
+.go-cache/
