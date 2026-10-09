@@ -22,20 +22,47 @@ export function isConnector(type: ObjectType) {
   return type === 'connector'
 }
 
-export function applyOp(doc: DocumentState, op: Op): DocumentState {
-  const objects = { ...doc.objects }
+function applyOpToMap(objects: Record<string, BoardObject>, op: Op): boolean {
   if (op.type === 'create') {
     const obj = op.value as BoardObject
-    if (!obj?.id) return doc
+    if (!obj?.id) return false
     objects[obj.id] = { ...obj, attachments: obj.attachments ?? [] }
-  } else if (op.type === 'update') {
-    const prev = objects[op.objectId]
-    if (!prev || !op.path) return doc
-    objects[op.objectId] = { ...prev, [op.path]: op.value }
-  } else if (op.type === 'delete') {
-    cascadeDelete(objects, op.objectId)
+    return true
   }
+  if (op.type === 'update') {
+    const prev = objects[op.objectId]
+    if (!prev || !op.path) return false
+    objects[op.objectId] = { ...prev, [op.path]: op.value }
+    return true
+  }
+  if (op.type === 'delete') {
+    if (!objects[op.objectId]) return false
+    cascadeDelete(objects, op.objectId)
+    return true
+  }
+  return false
+}
+
+export function applyOp(doc: DocumentState, op: Op): DocumentState {
+  const objects = { ...doc.objects }
+  if (!applyOpToMap(objects, op)) return doc
   return { rev: op.seq ?? doc.rev + 1, objects }
+}
+
+/** Apply many ops with a single copy of the object map. */
+export function applyOps(doc: DocumentState, ops: Op[]): DocumentState {
+  if (ops.length === 0) return doc
+  if (ops.length === 1) return applyOp(doc, ops[0])
+  const objects = { ...doc.objects }
+  let rev = doc.rev
+  let changed = false
+  for (const op of ops) {
+    if (!applyOpToMap(objects, op)) continue
+    changed = true
+    rev = op.seq ?? rev + 1
+  }
+  if (!changed) return doc
+  return { rev, objects }
 }
 
 function cascadeDelete(objects: Record<string, BoardObject>, id: string) {
@@ -105,8 +132,26 @@ export function centerOf(obj: BoardObject) {
   return { x: b.x + b.w / 2, y: b.y + b.h / 2 }
 }
 
+const childrenByParent = new WeakMap<Record<string, BoardObject>, Map<string, BoardObject[]>>()
+
+function childrenIndex(objects: Record<string, BoardObject>) {
+  const cached = childrenByParent.get(objects)
+  if (cached) return cached
+  const map = new Map<string, BoardObject[]>()
+  for (const o of Object.values(objects)) {
+    if (!o.parentId) continue
+    const list = map.get(o.parentId)
+    if (list) list.push(o)
+    else map.set(o.parentId, [o])
+  }
+  childrenByParent.set(objects, map)
+  return map
+}
+
+const NO_CHILDREN: BoardObject[] = []
+
 export function childrenOf(id: string, objects: Record<string, BoardObject>) {
-  return Object.values(objects).filter((o) => o.parentId === id)
+  return childrenIndex(objects).get(id) ?? NO_CHILDREN
 }
 
 export function descendants(id: string, objects: Record<string, BoardObject>) {

@@ -1,5 +1,16 @@
 import type { BoardObject, ObjectType } from '@/lib/types'
 
+export type NodeLod = 'full' | 'low'
+
+const LOD_MIN_SCREEN_FONT = 5
+const DEFAULT_NOTE_FONT = 16
+
+/** Post-its whose text would draw under ~5 screen px render as plain cards. */
+export function nodeLod(obj: BoardObject, scale: number): NodeLod {
+  if (obj.type !== 'postit') return 'full'
+  return (obj.fontSize || DEFAULT_NOTE_FONT) * scale < LOD_MIN_SCREEN_FONT ? 'low' : 'full'
+}
+
 export function trianglePoints(w: number, h: number) {
   return [w / 2, 0, w, h, 0, h]
 }

@@ -1,5 +1,5 @@
 import type Konva from 'konva'
-import { useRef, useState } from 'react'
+import { memo, useRef, useState } from 'react'
 import { Circle, Ellipse, Group, Line, Rect, Shape, Text } from 'react-konva'
 import { arrowHeadPoints, polylineMidpoint, routeForConnector } from '@/lib/connectors'
 import { type CanvasTheme } from '@/lib/canvasTheme'
@@ -9,13 +9,14 @@ import {
   konvaFontStyle,
   NOTE_LINE_HEIGHT,
   NOTE_PAD,
+  noteFontPref,
   objectFontFamily,
   objectTextAlign,
   titleFontSize,
 } from '@/lib/textStyle'
 import type { BoardObject } from '@/lib/types'
 import { BoardImage } from './BoardImage'
-import { polygonFor, roundrectRadius } from './shapeGeom'
+import { type NodeLod, polygonFor, roundrectRadius } from './shapeGeom'
 
 type LivePos = Record<string, { x: number; y: number; w?: number; h?: number }>
 
@@ -27,6 +28,9 @@ type Props = {
   draggable?: boolean
   theme: CanvasTheme
   editing?: boolean
+  lod?: NodeLod
+  /** Changes when web fonts load; remounts text so Konva re-measures. */
+  fontEpoch?: number
   preview?: { x: number; y: number }
   livePos?: LivePos
   onSelect: (id: string, shift: boolean) => void
@@ -36,7 +40,54 @@ type Props = {
   onLiveTransform?: () => void
 }
 
-export function ObjectNode({
+function samePreview(
+  a?: { x: number; y: number },
+  b?: { x: number; y: number },
+) {
+  if (a === b) return true
+  if (!a || !b) return !a && !b
+  return a.x === b.x && a.y === b.y
+}
+
+function endpointKey(objects: Record<string, BoardObject>, id: string | undefined, livePos?: LivePos) {
+  if (!id) return ''
+  const o = objects[id]
+  if (!o) return ''
+  const live = livePos?.[id]
+  const x = live?.x ?? o.x
+  const y = live?.y ?? o.y
+  const w = live?.w ?? o.w
+  const h = live?.h ?? o.h
+  return `${x},${y},${w},${h},${o.rotation}`
+}
+
+function objectPropsEqual(prev: Props, next: Props) {
+  if (prev.obj !== next.obj) return false
+  if (prev.selected !== next.selected) return false
+  if (prev.listening !== next.listening) return false
+  if (prev.draggable !== next.draggable) return false
+  if (prev.theme !== next.theme) return false
+  if (prev.editing !== next.editing) return false
+  if (prev.lod !== next.lod) return false
+  if (prev.fontEpoch !== next.fontEpoch) return false
+  if (!samePreview(prev.preview, next.preview)) return false
+  if (prev.onSelect !== next.onSelect) return false
+  if (prev.onChange !== next.onChange) return false
+  if (prev.onLiveMove !== next.onLiveMove) return false
+  if (prev.onEditText !== next.onEditText) return false
+  if (prev.onLiveTransform !== next.onLiveTransform) return false
+  if (next.obj.type === 'connector') {
+    if (endpointKey(prev.objects, prev.obj.fromId, prev.livePos) !== endpointKey(next.objects, next.obj.fromId, next.livePos)) {
+      return false
+    }
+    if (endpointKey(prev.objects, prev.obj.toId, prev.livePos) !== endpointKey(next.objects, next.obj.toId, next.livePos)) {
+      return false
+    }
+  }
+  return true
+}
+
+function ObjectNodeInner({
   obj,
   objects,
   selected,
@@ -44,6 +95,8 @@ export function ObjectNode({
   draggable: draggableProp,
   theme,
   editing,
+  lod = 'full',
+  fontEpoch,
   preview,
   livePos,
   onSelect,
@@ -54,6 +107,7 @@ export function ObjectNode({
 }: Props) {
   const groupRef = useRef<Konva.Group>(null)
   const noteLive = useRef<{ x: number; y: number; w: number; h: number } | null>(null)
+  const noteShadowRef = useRef<Konva.Rect>(null)
   const noteBodyRef = useRef<Konva.Rect>(null)
   const noteBarRef = useRef<Konva.Rect>(null)
   const noteTextRef = useRef<Konva.Text>(null)
@@ -69,17 +123,10 @@ export function ObjectNode({
       : 0
   const noteW = obj.type === 'postit' ? (noteBox?.w ?? obj.w) : obj.w
   const noteH = obj.type === 'postit' ? (noteBox?.h ?? obj.h) : obj.h
-  const noteFont = displayNoteFontSize({
-    w: noteW,
-    h: noteH,
-    text: obj.text || '',
-    fontFamily: objectFontFamily(obj),
-    fontSize: obj.fontSize,
-    bold: obj.bold,
-    italic: obj.italic,
-  })
 
   const applyNoteBox = (box: { w: number; h: number }) => {
+    noteShadowRef.current?.width(box.w)
+    noteShadowRef.current?.height(box.h)
     noteBodyRef.current?.width(box.w)
     noteBodyRef.current?.height(box.h)
     noteBarRef.current?.width(box.w)
@@ -90,7 +137,7 @@ export function ObjectNode({
         h: box.h,
         text: obj.text || '',
         fontFamily: objectFontFamily(obj),
-        fontSize: obj.fontSize,
+        fontSize: noteFontPref(obj),
         bold: obj.bold,
         italic: obj.italic,
       })
@@ -144,6 +191,7 @@ export function ObjectNode({
     return (
       <Group id={obj.id} listening={listening} onClick={pick} onTap={pick}>
         <Line
+          id={`route-${obj.id}`}
           points={pts}
           stroke={color}
           strokeWidth={obj.strokeWidth || 2}
@@ -152,10 +200,19 @@ export function ObjectNode({
           hitStrokeWidth={18}
         />
         {head ? (
-          <Line points={head} closed fill={color} stroke={color} strokeWidth={1} listening={false} />
+          <Line
+            id={`head-${obj.id}`}
+            points={head}
+            closed
+            fill={color}
+            stroke={color}
+            strokeWidth={1}
+            listening={false}
+          />
         ) : null}
         {obj.text && !editing ? (
           <Text
+            id={`label-${obj.id}`}
             x={mid.x + 6}
             y={mid.y - 8}
             text={obj.text}
@@ -224,6 +281,7 @@ export function ObjectNode({
           fill={obj.fill}
           stroke={obj.stroke}
           strokeWidth={obj.strokeWidth}
+          perfectDrawEnabled={false}
         />
       )}
       {obj.type === 'roundrect' && (
@@ -235,6 +293,7 @@ export function ObjectNode({
             fill={obj.fill}
             stroke={obj.stroke}
             strokeWidth={obj.strokeWidth}
+            perfectDrawEnabled={false}
           />
           {selected && listening && (
             <Circle
@@ -286,6 +345,7 @@ export function ObjectNode({
           fill={obj.fill}
           stroke={obj.stroke}
           strokeWidth={obj.strokeWidth}
+          perfectDrawEnabled={false}
         />
       )}
       {obj.type === 'cylinder' && (() => {
@@ -337,6 +397,18 @@ export function ObjectNode({
       })()}
       {obj.type === 'postit' && (
         <>
+          {lod === 'full' && (
+            <Rect
+              ref={noteShadowRef}
+              y={3}
+              width={noteW}
+              height={noteH}
+              fill={theme.postitShadow}
+              cornerRadius={8}
+              perfectDrawEnabled={false}
+              listening={false}
+            />
+          )}
           <Rect
             ref={noteBodyRef}
             width={noteW}
@@ -344,14 +416,22 @@ export function ObjectNode({
             fill={obj.fill}
             stroke={selected ? obj.stroke : 'rgba(0,0,0,0.08)'}
             strokeWidth={1}
-            shadowColor={theme.postitShadow}
-            shadowBlur={10}
-            shadowOffsetY={3}
             cornerRadius={8}
+            perfectDrawEnabled={false}
           />
-          <Rect ref={noteBarRef} width={noteW} height={8} fill="rgba(0,0,0,0.06)" />
-          {!editing && (
+          {lod === 'full' && (
+            <Rect
+              ref={noteBarRef}
+              width={noteW}
+              height={8}
+              fill="rgba(0,0,0,0.06)"
+              perfectDrawEnabled={false}
+              listening={false}
+            />
+          )}
+          {!editing && lod === 'full' && (
             <Text
+              key={fontEpoch}
               ref={noteTextRef}
               x={NOTE_PAD.x}
               y={NOTE_PAD.y}
@@ -360,9 +440,18 @@ export function ObjectNode({
               text={obj.text || 'Write a note…'}
               fill={obj.text ? '#1e2a4a' : theme.muted}
               fontFamily={objectFontFamily(obj)}
-              fontSize={noteFont}
+              fontSize={displayNoteFontSize({
+                w: noteW,
+                h: noteH,
+                text: obj.text || '',
+                fontFamily: objectFontFamily(obj),
+                fontSize: noteFontPref(obj),
+                bold: obj.bold,
+                italic: obj.italic,
+              })}
               fontStyle={konvaFontStyle(obj)}
               align={objectTextAlign(obj)}
+              verticalAlign="middle"
               lineHeight={NOTE_LINE_HEIGHT}
               wrap="word"
               listening={false}
@@ -375,6 +464,7 @@ export function ObjectNode({
           <Rect width={obj.w} height={obj.h} fill="transparent" />
           {!editing && (
             <Text
+              key={fontEpoch}
               width={obj.w}
               height={obj.h}
               text={obj.text || 'Type something…'}
@@ -411,6 +501,7 @@ export function ObjectNode({
             stroke={selected ? theme.select : obj.stroke || theme.frameStroke}
             strokeWidth={1.5}
             cornerRadius={16}
+            perfectDrawEnabled={false}
           />
           <Rect width={obj.w} height={28} fill={theme.bar} cornerRadius={[16, 16, 0, 0]} />
           {!editing && (
@@ -438,6 +529,7 @@ export function ObjectNode({
               stroke={selected ? theme.select : obj.stroke || theme.frameStroke}
               strokeWidth={1}
               cornerRadius={12}
+              perfectDrawEnabled={false}
             />
             <Rect width={obj.w} height={28} fill={theme.bar} cornerRadius={[12, 12, 0, 0]} />
             {!editing && (
@@ -463,6 +555,7 @@ export function ObjectNode({
               stroke={selected ? theme.select : obj.stroke || theme.frameStroke}
               strokeWidth={1}
               cornerRadius={12}
+              perfectDrawEnabled={false}
             />
             <Rect width={28} height={obj.h} fill={theme.bar} cornerRadius={[12, 0, 0, 12]} />
             {!editing && (
@@ -514,8 +607,11 @@ export function ObjectNode({
           stroke={obj.stroke}
           strokeWidth={obj.strokeWidth}
           lineJoin="round"
+          perfectDrawEnabled={false}
         />
       )}
     </Group>
   )
 }
+
+export const ObjectNode = memo(ObjectNodeInner, objectPropsEqual)

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { applyOp } from './ops'
+import { applyOp, applyOps } from './ops'
 import type {
   BoardObject,
   ChatMessage,
@@ -33,6 +33,7 @@ export function useBoardSession(boardId: string, user: User) {
   const undoRef = useRef<UndoStep[]>([])
   const redoRef = useRef<UndoStep[]>([])
   const batchRef = useRef<UndoStep | null>(null)
+  const batchOpsRef = useRef<Op[] | null>(null)
   const replayingRef = useRef(false)
   const objectsRef = useRef(doc.objects)
   objectsRef.current = doc.objects
@@ -54,15 +55,18 @@ export function useBoardSession(boardId: string, user: User) {
   const commitOp = useCallback(
     (op: Op, inverse?: Inverse) => {
       pendingRef.current.add(op.id)
-      setDoc((d) => applyOp(d, op))
-      send({ type: 'op', op })
-      if (!inverse || replayingRef.current) return
       const batch = batchRef.current
       if (batch) {
+        batchOpsRef.current?.push(op)
+        send({ type: 'op', op })
+        if (!inverse || replayingRef.current) return
         batch.redo.push(op)
         batch.undo.push(inverse)
         return
       }
+      setDoc((d) => applyOp(d, op))
+      send({ type: 'op', op })
+      if (!inverse || replayingRef.current) return
       pushUndo({ undo: [inverse], redo: [op] })
     },
     [pushUndo, send],
@@ -75,11 +79,15 @@ export function useBoardSession(boardId: string, user: User) {
         return
       }
       batchRef.current = { undo: [], redo: [] }
+      batchOpsRef.current = []
       try {
         fn()
       } finally {
         const step = batchRef.current
+        const ops = batchOpsRef.current ?? []
         batchRef.current = null
+        batchOpsRef.current = null
+        if (ops.length) setDoc((d) => applyOps(d, ops))
         if (step && step.undo.length) pushUndo(step)
       }
     },
@@ -170,12 +178,16 @@ export function useBoardSession(boardId: string, user: User) {
     [commitOp, user.id],
   )
 
-  const applyHistoryOp = useCallback(
-    (template: Op) => {
-      const op: Op = { ...template, id: newId('op'), value: template.value }
-      pendingRef.current.add(op.id)
-      setDoc((d) => applyOp(d, op))
-      send({ type: 'op', op })
+  const replayOps = useCallback(
+    (templates: Op[]) => {
+      const ops: Op[] = templates.map((template) => ({
+        ...template,
+        id: newId('op'),
+        value: template.value,
+      }))
+      for (const op of ops) pendingRef.current.add(op.id)
+      if (ops.length) setDoc((d) => applyOps(d, ops))
+      for (const op of ops) send({ type: 'op', op })
     },
     [send],
   )
@@ -184,20 +196,20 @@ export function useBoardSession(boardId: string, user: User) {
     const step = undoRef.current.pop()
     if (!step) return
     replayingRef.current = true
-    for (const inv of [...step.undo].reverse()) applyHistoryOp(inv)
+    replayOps([...step.undo].reverse())
     redoRef.current.push(step)
     replayingRef.current = false
-  }, [applyHistoryOp])
+  }, [replayOps])
 
   const redo = useCallback(() => {
     const step = redoRef.current.pop()
     if (!step) return
     replayingRef.current = true
-    for (const op of step.redo) applyHistoryOp(op)
+    replayOps(step.redo)
     undoRef.current.push(step)
     if (undoRef.current.length > 80) undoRef.current.shift()
     replayingRef.current = false
-  }, [applyHistoryOp])
+  }, [replayOps])
 
   const sendCursor = useCallback(
     (x: number, y: number) => {

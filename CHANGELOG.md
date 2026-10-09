@@ -9,6 +9,25 @@ Version numbers are defined in [`VERSIONS`](VERSIONS).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-10-09
+
+### Added
+
+- Sticky notes auto-fit their text by default: the font grows to fill the note and shrinks as you type (new **Auto** option in the size picker)
+
+### Changed
+
+- Sticky note text is centered horizontally and vertically by default, including while editing; notes from older boards using the old defaults render the same way
+- Note size and alignment defaults are tracked separately from plain text defaults
+- Faster canvas on large boards: off-screen objects are culled, notes render as plain cards when zoomed far out, moving shapes draw on their own layer, and pan/zoom updates once per animation frame
+- Faster editing: batched ops apply in a single update, and connector routes, snap targets, child lookups, and note font sizes are cached
+- README documents the self-contained binary with the embedded SPA
+
+### Fixed
+
+- Note text measured with the fallback font before web fonts finished loading, so it could be sized wrong or clipped
+- Note placeholder ignored alignment in some browsers (Safari)
+
 ## [0.2.0] — 2026-09-13
 
 ### Added

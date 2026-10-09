@@ -34,11 +34,16 @@ export function writeSnapEnabled(on: boolean) {
   }
 }
 
-function snapValue(value: number, targets: number[], threshold: number): { value: number; guide?: number } {
+function snapValue(
+  value: number,
+  targets: number[],
+  extra: number[],
+  threshold: number,
+): { value: number; guide?: number } {
   let best = value
   let bestDist = threshold
   let guide: number | undefined
-  for (const t of targets) {
+  const consider = (t: number) => {
     const d = Math.abs(value - t)
     if (d < bestDist) {
       bestDist = d
@@ -46,6 +51,8 @@ function snapValue(value: number, targets: number[], threshold: number): { value
       guide = t
     }
   }
+  for (const t of targets) consider(t)
+  for (const t of extra) consider(t)
   return { value: best, guide }
 }
 
@@ -56,6 +63,39 @@ function gridTargetsNear(value: number, grid: number): number[] {
   return out
 }
 
+type SnapEdge = {
+  id: string
+  x: number
+  cx: number
+  r: number
+  y: number
+  cy: number
+  b: number
+}
+
+const edgeCache = new WeakMap<Record<string, BoardObject>, SnapEdge[]>()
+
+function edgesOf(objects: Record<string, BoardObject>): SnapEdge[] {
+  const cached = edgeCache.get(objects)
+  if (cached) return cached
+  const edges: SnapEdge[] = []
+  for (const o of Object.values(objects)) {
+    if (o.type === 'connector') continue
+    const box = objectAABB(o)
+    edges.push({
+      id: o.id,
+      x: box.x,
+      cx: box.x + box.w / 2,
+      r: box.x + box.w,
+      y: box.y,
+      cy: box.y + box.h / 2,
+      b: box.y + box.h,
+    })
+  }
+  edgeCache.set(objects, edges)
+  return edges
+}
+
 function collectObjectTargets(
   objects: Record<string, BoardObject>,
   exclude: Set<string>,
@@ -63,12 +103,18 @@ function collectObjectTargets(
 ): { xs: number[]; ys: number[] } {
   const xs: number[] = []
   const ys: number[] = []
-  for (const o of Object.values(objects)) {
-    if (exclude.has(o.id) || o.type === 'connector') continue
-    const live = livePos?.[o.id]
-    const box = objectAABB(live ? { ...o, ...live } : o)
-    xs.push(box.x, box.x + box.w / 2, box.x + box.w)
-    ys.push(box.y, box.y + box.h / 2, box.y + box.h)
+  for (const edge of edgesOf(objects)) {
+    if (exclude.has(edge.id)) continue
+    const live = livePos?.[edge.id]
+    if (live) {
+      const w = edge.r - edge.x
+      const h = edge.b - edge.y
+      xs.push(live.x, live.x + w / 2, live.x + w)
+      ys.push(live.y, live.y + h / 2, live.y + h)
+      continue
+    }
+    xs.push(edge.x, edge.cx, edge.r)
+    ys.push(edge.y, edge.cy, edge.b)
   }
   return { xs, ys }
 }
@@ -90,12 +136,12 @@ export function snapBox(
   const threshold = opts.threshold ?? SNAP_THRESHOLD
   const { xs: objXs, ys: objYs } = collectObjectTargets(opts.objects, opts.exclude, opts.livePos)
 
-  const left = snapValue(box.x, [...objXs, ...gridTargetsNear(box.x, grid)], threshold)
-  const cx = snapValue(box.x + box.w / 2, [...objXs, ...gridTargetsNear(box.x + box.w / 2, grid)], threshold)
-  const right = snapValue(box.x + box.w, [...objXs, ...gridTargetsNear(box.x + box.w, grid)], threshold)
-  const top = snapValue(box.y, [...objYs, ...gridTargetsNear(box.y, grid)], threshold)
-  const cy = snapValue(box.y + box.h / 2, [...objYs, ...gridTargetsNear(box.y + box.h / 2, grid)], threshold)
-  const bottom = snapValue(box.y + box.h, [...objYs, ...gridTargetsNear(box.y + box.h, grid)], threshold)
+  const left = snapValue(box.x, objXs, gridTargetsNear(box.x, grid), threshold)
+  const cx = snapValue(box.x + box.w / 2, objXs, gridTargetsNear(box.x + box.w / 2, grid), threshold)
+  const right = snapValue(box.x + box.w, objXs, gridTargetsNear(box.x + box.w, grid), threshold)
+  const top = snapValue(box.y, objYs, gridTargetsNear(box.y, grid), threshold)
+  const cy = snapValue(box.y + box.h / 2, objYs, gridTargetsNear(box.y + box.h / 2, grid), threshold)
+  const bottom = snapValue(box.y + box.h, objYs, gridTargetsNear(box.y + box.h, grid), threshold)
 
   type Cand = { pos: number; dist: number; guide?: number }
   const xCands: Cand[] = [
@@ -149,10 +195,10 @@ export function snapResizeBox(
   const threshold = opts.threshold ?? SNAP_THRESHOLD
   const { xs: objXs, ys: objYs } = collectObjectTargets(opts.objects, opts.exclude)
 
-  const left = snapValue(box.x, [...objXs, ...gridTargetsNear(box.x, grid)], threshold)
-  const right = snapValue(box.x + box.w, [...objXs, ...gridTargetsNear(box.x + box.w, grid)], threshold)
-  const top = snapValue(box.y, [...objYs, ...gridTargetsNear(box.y, grid)], threshold)
-  const bottom = snapValue(box.y + box.h, [...objYs, ...gridTargetsNear(box.y + box.h, grid)], threshold)
+  const left = snapValue(box.x, objXs, gridTargetsNear(box.x, grid), threshold)
+  const right = snapValue(box.x + box.w, objXs, gridTargetsNear(box.x + box.w, grid), threshold)
+  const top = snapValue(box.y, objYs, gridTargetsNear(box.y, grid), threshold)
+  const bottom = snapValue(box.y + box.h, objYs, gridTargetsNear(box.y + box.h, grid), threshold)
 
   const snapLeft = left.guide !== undefined && Math.abs(box.x - left.value) < threshold
   const snapRight = right.guide !== undefined && Math.abs(box.x + box.w - right.value) < threshold

@@ -1,3 +1,4 @@
+import { useSyncExternalStore } from 'react'
 import { CANVAS_FONT } from '@/lib/canvasTheme'
 import type { BoardObject } from '@/lib/types'
 
@@ -25,6 +26,9 @@ export const NOTE_FONT_MIN = 10
 export const NOTE_FONT_MAX = 96
 const NOTE_REF_SIDE = 160
 const NOTE_REF_FONT = 22
+/** Auto-size cap as a fraction of the note's shorter side. */
+const NOTE_AUTO_RATIO = 0.4
+const NOTE_AUTO_MAX = 480
 
 export function objectFontFamily(obj: Pick<BoardObject, 'fontFamily'>) {
   return obj.fontFamily || CANVAS_FONT
@@ -41,8 +45,20 @@ export function cssFontWeight(obj: Pick<BoardObject, 'bold'>) {
   return obj.bold ? 700 : 400
 }
 
-export function objectTextAlign(obj: Pick<BoardObject, 'textAlign'>) {
-  return obj.textAlign === 'center' || obj.textAlign === 'right' ? obj.textAlign : 'left'
+/** Notes created before auto-fit stored the old shared defaults (20px, left); render them as auto + centered. */
+export function isLegacyNoteStyle(obj: Partial<Pick<BoardObject, 'type' | 'fontSize' | 'textAlign'>>) {
+  return obj.type === 'postit' && obj.fontSize === 20 && obj.textAlign === 'left'
+}
+
+/** Note font preference; undefined means auto-fit. */
+export function noteFontPref(obj: Pick<BoardObject, 'type' | 'fontSize' | 'textAlign'>) {
+  return isLegacyNoteStyle(obj) ? undefined : obj.fontSize || undefined
+}
+
+export function objectTextAlign(obj: Pick<BoardObject, 'textAlign'> & Partial<Pick<BoardObject, 'type' | 'fontSize'>>) {
+  if (isLegacyNoteStyle(obj)) return 'center'
+  if (obj.textAlign === 'left' || obj.textAlign === 'center' || obj.textAlign === 'right') return obj.textAlign
+  return obj.type === 'postit' ? 'center' : 'left'
 }
 
 function noteSide(w: number, h: number) {
@@ -145,7 +161,8 @@ export function measureNoteTextHeight(
 }
 
 /**
- * Preferred note font (explicit or proportional), shrunk so wrapped text fits the padded box.
+ * Auto (no fontSize): largest size that fits the padded box, capped relative to the note side.
+ * Explicit fontSize: preferred size scaled with the note, shrunk to fit.
  * Empty notes size against the placeholder so canvas and edit overlay match.
  */
 export function fitNoteFontSize({
@@ -157,14 +174,18 @@ export function fitNoteFontSize({
   bold,
   italic,
 }: FitNoteArgs) {
-  const base = noteFontSize({ w, h, fontSize })
+  const max = fontSize ? NOTE_FONT_MAX : NOTE_AUTO_MAX
+  const base = fontSize
+    ? noteFontSize({ w, h, fontSize })
+    : Math.max(NOTE_FONT_MIN, Math.min(max, noteSide(w, h) * NOTE_AUTO_RATIO))
   const { width: boxW, height: boxH } = noteTextBox(w, h)
   const family = fontFamily || CANVAS_FONT
   const style = konvaFontStyle({ bold, italic })
   const sample = text.trim() ? text : 'Write a note…'
 
+  // Slack so Konva's own wrap never drops a last line our estimate thought fit.
   const fits = (size: number) =>
-    measureNoteTextHeight(sample, boxW, size, family, style) <= boxH + 0.5
+    measureNoteTextHeight(sample, boxW - 2, size, family, style) <= boxH - 1
 
   if (fits(base)) return base
 
@@ -180,12 +201,58 @@ export function fitNoteFontSize({
       hi = mid
     }
   }
-  return Math.max(NOTE_FONT_MIN, Math.min(NOTE_FONT_MAX, best))
+  return Math.max(NOTE_FONT_MIN, Math.min(max, best))
+}
+
+const noteFontCache = new Map<string, number>()
+const NOTE_FONT_CACHE_MAX = 4000
+
+let fontEpoch = 0
+const fontListeners = new Set<() => void>()
+
+function bumpFontEpoch() {
+  noteFontCache.clear()
+  fontEpoch += 1
+  for (const l of fontListeners) l()
+}
+
+if (typeof document !== 'undefined' && document.fonts) {
+  // Web fonts swap in after first paint; sizes measured with the fallback font are wrong.
+  document.fonts.addEventListener('loadingdone', bumpFontEpoch)
+  void Promise.all([
+    document.fonts.load(`400 16px ${CANVAS_FONT}`),
+    document.fonts.load(`700 16px ${CANVAS_FONT}`),
+  ])
+    .catch(() => undefined)
+    .then(bumpFontEpoch)
+}
+
+/** Increments whenever web fonts finish loading; key canvas text on it to re-measure. */
+export function useFontEpoch() {
+  return useSyncExternalStore(
+    (cb) => {
+      fontListeners.add(cb)
+      return () => fontListeners.delete(cb)
+    },
+    () => fontEpoch,
+    () => 0,
+  )
 }
 
 /** Scale with the note box, then shrink so wrapped text fits the padded area. */
 export function displayNoteFontSize(args: FitNoteArgs) {
-  return fitNoteFontSize(args)
+  const w = Math.round(args.w)
+  const h = Math.round(args.h)
+  const key = `${w}\0${h}\0${args.fontSize ?? ''}\0${args.bold ? 1 : 0}${args.italic ? 1 : 0}\0${args.fontFamily ?? ''}\0${args.text}`
+  const hit = noteFontCache.get(key)
+  if (hit !== undefined) return hit
+  const size = fitNoteFontSize({ ...args, w, h })
+  if (noteFontCache.size >= NOTE_FONT_CACHE_MAX) {
+    const oldest = noteFontCache.keys().next().value
+    if (oldest !== undefined) noteFontCache.delete(oldest)
+  }
+  noteFontCache.set(key, size)
+  return size
 }
 
 export function titleFontSize(obj: BoardObject) {

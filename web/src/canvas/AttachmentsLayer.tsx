@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { Circle, Group, Label, Tag, Text } from 'react-konva'
 import { CANVAS_FONT, type CanvasTheme } from '@/lib/canvasTheme'
 import type { BoardObject } from '@/lib/types'
@@ -11,7 +12,19 @@ type Props = {
   theme: CanvasTheme
 }
 
-export function AttachmentsLayer({ objects, theme }: Props) {
+function sameObjects(a: BoardObject[], b: BoardObject[]) {
+  if (a === b) return true
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
+export const AttachmentsLayer = memo(
+  AttachmentsLayerInner,
+  (prev, next) => prev.theme === next.theme && sameObjects(prev.objects, next.objects),
+)
+
+function AttachmentsLayerInner({ objects, theme }: Props) {
   return (
     <>
       {objects.flatMap((obj) => {

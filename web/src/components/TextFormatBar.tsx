@@ -12,6 +12,9 @@ import {
   TEXT_FONTS,
   TEXT_SIZES,
   bodyFontSize,
+  displayNoteFontSize,
+  isLegacyNoteStyle,
+  noteFontPref,
   noteFontSize,
   noteStoredFontSize,
   objectFontFamily,
@@ -27,23 +30,43 @@ type Props = {
 
 export function TextFormatBar({ obj, onChange }: Props) {
   const family = objectFontFamily(obj)
+  const isNote = obj.type === 'postit'
+  const legacy = isLegacyNoteStyle(obj)
+  const autoSize = isNote && !noteFontPref(obj)
   const size = Math.round(
-    obj.type === 'postit'
-      ? noteFontSize(obj)
-      : obj.type === 'frame' || obj.type === 'lane'
-        ? titleFontSize(obj)
-        : bodyFontSize(obj),
+    autoSize
+      ? displayNoteFontSize({
+          w: obj.w,
+          h: obj.h,
+          text: obj.text || '',
+          fontFamily: family,
+          bold: obj.bold,
+          italic: obj.italic,
+        })
+      : isNote
+        ? noteFontSize(obj)
+        : obj.type === 'frame' || obj.type === 'lane'
+          ? titleFontSize(obj)
+          : bodyFontSize(obj),
   )
   const align = objectTextAlign(obj)
-  const showSize = obj.type === 'text' || obj.type === 'postit' || obj.type === 'frame' || obj.type === 'lane'
-  const showAlign = obj.type === 'text' || obj.type === 'postit'
+  const showSize = obj.type === 'text' || isNote || obj.type === 'frame' || obj.type === 'lane'
+  const showAlign = obj.type === 'text' || isNote
 
   const setSize = (next: number) => {
-    if (obj.type === 'postit') {
-      onChange('fontSize', noteStoredFontSize(next, obj.w, obj.h))
+    if (isNote) {
+      // Resolve legacy defaults first, or the new value would still read as legacy.
+      if (legacy) onChange('textAlign', 'center')
+      // 0 clears to auto: the server ignores null and rejects a missing value.
+      onChange('fontSize', next ? noteStoredFontSize(next, obj.w, obj.h) : 0)
       return
     }
     onChange('fontSize', next)
+  }
+
+  const setAlign = (next: 'left' | 'center' | 'right') => {
+    if (legacy) onChange('fontSize', 0)
+    onChange('textAlign', next)
   }
 
   const bumpSize = (dir: -1 | 1) => {
@@ -76,12 +99,13 @@ export function TextFormatBar({ obj, onChange }: Props) {
       </select>
       {showSize ? (
         <select
-          value={size}
+          value={autoSize ? 0 : size}
           onChange={(e) => setSize(Number(e.target.value))}
           className="h-8 w-[3.5rem] rounded-full border border-input bg-card px-1.5 text-xs font-semibold tabular-nums outline-none"
           aria-label="Size"
         >
-          {!TEXT_SIZES.includes(size) ? <option value={size}>{size}</option> : null}
+          {isNote ? <option value={0}>Auto</option> : null}
+          {!autoSize && !TEXT_SIZES.includes(size) ? <option value={size}>{size}</option> : null}
           {TEXT_SIZES.map((n) => (
             <option key={n} value={n}>
               {n}
@@ -118,7 +142,7 @@ export function TextFormatBar({ obj, onChange }: Props) {
             size="icon"
             className={align === 'left' ? 'size-8 bg-accent text-accent-foreground' : 'size-8'}
             hint="Align left"
-            onClick={() => onChange('textAlign', 'left')}
+            onClick={() => setAlign('left')}
           >
             <AlignLeft />
           </Button>
@@ -128,7 +152,7 @@ export function TextFormatBar({ obj, onChange }: Props) {
             size="icon"
             className={align === 'center' ? 'size-8 bg-accent text-accent-foreground' : 'size-8'}
             hint="Align center"
-            onClick={() => onChange('textAlign', 'center')}
+            onClick={() => setAlign('center')}
           >
             <AlignCenter />
           </Button>
@@ -138,7 +162,7 @@ export function TextFormatBar({ obj, onChange }: Props) {
             size="icon"
             className={align === 'right' ? 'size-8 bg-accent text-accent-foreground' : 'size-8'}
             hint="Align right"
-            onClick={() => onChange('textAlign', 'right')}
+            onClick={() => setAlign('right')}
           >
             <AlignRight />
           </Button>

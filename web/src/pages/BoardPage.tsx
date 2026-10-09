@@ -150,12 +150,15 @@ function BoardSession({
     bold: boolean
     italic: boolean
     textAlign: 'left' | 'center' | 'right'
+    noteFontSize: number
+    noteTextAlign?: 'left' | 'center' | 'right'
   }>({
     fontFamily: CANVAS_FONT,
     fontSize: 20,
     bold: false,
     italic: false,
     textAlign: 'left',
+    noteFontSize: 0,
   })
   const [stickerEmoji, setStickerEmoji] = useState(STICKER_EMOJIS[0])
   const [snapEnabled, setSnapEnabled] = useState(readSnapEnabled)
@@ -165,12 +168,13 @@ function BoardSession({
   const showType = tool === 'postit' || tool === 'text' || !!(selected && isTexty(selected.type))
   const showSticker = tool === 'sticker' || selected?.type === 'sticker'
   const activeStickerEmoji = selected?.type === 'sticker' ? (selected.text || stickerEmoji) : stickerEmoji
+  const draftType = tool === 'text' ? 'text' : 'postit'
   const typeTarget: BoardObject =
     selected && isTexty(selected.type)
       ? selected
       : {
           id: '_type',
-          type: tool === 'text' ? 'text' : 'postit',
+          type: draftType,
           x: 0,
           y: 0,
           w: 160,
@@ -181,10 +185,10 @@ function BoardSession({
           stroke,
           strokeWidth: 2,
           fontFamily: typeStyle.fontFamily,
-          fontSize: typeStyle.fontSize,
+          fontSize: draftType === 'postit' ? typeStyle.noteFontSize : typeStyle.fontSize,
           bold: typeStyle.bold,
           italic: typeStyle.italic,
-          textAlign: typeStyle.textAlign,
+          textAlign: draftType === 'postit' ? typeStyle.noteTextAlign : typeStyle.textAlign,
         }
 
   const applyPatches = useCallback(
@@ -437,6 +441,58 @@ function BoardSession({
     )
   }
 
+  const { createObject, withBatch, updateObject, updateObjectLive } = session
+  const toolRef = useRef(tool)
+  toolRef.current = tool
+  const addImageFilesRef = useRef(addImageFiles)
+  addImageFilesRef.current = addImageFiles
+
+  const handleCreate = useCallback(
+    (obj: BoardObject) => {
+      createObject(obj)
+      if (obj.type !== 'connector' && obj.type !== 'sticker' && toolRef.current !== 'mindmap') {
+        setTool('select')
+      }
+      setSelectedIds([obj.id])
+    },
+    [createObject, setSelectedIds, setTool],
+  )
+
+  const handleCreateMany = useCallback(
+    (objs: BoardObject[]) => {
+      withBatch(() => {
+        for (const o of objs) createObject(o)
+      })
+      const last = [...objs].reverse().find((o) => o.type !== 'connector')
+      if (last) setSelectedIds([last.id])
+    },
+    [createObject, withBatch, setSelectedIds],
+  )
+
+  const handleLiveMove = useCallback(
+    (id: string, x: number, y: number) => {
+      updateObjectLive(id, 'x', x)
+      updateObjectLive(id, 'y', y)
+    },
+    [updateObjectLive],
+  )
+
+  const handleImages = useCallback((files: File[], at: { x: number; y: number }) => {
+    void persistImageFiles(files).then((copies) => {
+      void addImageFilesRef.current(copies, at)
+    })
+  }, [])
+
+  const handleCommitPatches = useCallback(
+    (patches: { id: string; path: string; value: unknown }[]) => {
+      if (!patches.length) return
+      withBatch(() => {
+        for (const p of patches) updateObject(p.id, p.path, p.value)
+      })
+    },
+    [updateObject, withBatch],
+  )
+
   return (
     <div className="flex h-svh flex-col bg-background" onClick={() => setMenuOpen(false)}>
       <header
@@ -594,29 +650,13 @@ function BoardSession({
             stroke={stroke}
             strokeWidth={2}
             cursors={Object.values(session.cursors)}
-            onCreate={(obj) => {
-              session.createObject(obj)
-              if (obj.type !== 'connector' && obj.type !== 'sticker' && tool !== 'mindmap') {
-                setTool('select')
-              }
-              setSelectedIds([obj.id])
-            }}
-            onCreateMany={(objs) => {
-              session.withBatch(() => {
-                for (const o of objs) session.createObject(o)
-              })
-              const last = [...objs].reverse().find((o) => o.type !== 'connector')
-              if (last) setSelectedIds([last.id])
-            }}
+            onCreate={handleCreate}
+            onCreateMany={handleCreateMany}
             onUpdate={session.updateObject}
-            onLiveMove={(id, x, y) => {
-              session.updateObjectLive(id, 'x', x)
-              session.updateObjectLive(id, 'y', y)
-            }}
+            onLiveMove={handleLiveMove}
+            onCommitPatches={handleCommitPatches}
             onCursor={session.sendCursor}
-            onImages={(files, at) => {
-              void persistImageFiles(files).then((copies) => addImageFiles(copies, at))
-            }}
+            onImages={handleImages}
             textStyle={typeStyle}
             stickerEmoji={stickerEmoji}
             snapEnabled={snapEnabled}
@@ -650,11 +690,15 @@ function BoardSession({
                       onChange={(path, value) => {
                         if (selected && isTexty(selected.type)) session.updateObject(selected.id, path, value)
                         if (path === 'fontFamily') setTypeStyle((s) => ({ ...s, fontFamily: String(value) }))
-                        if (path === 'fontSize') setTypeStyle((s) => ({ ...s, fontSize: Number(value) }))
+                        const forNote = typeTarget.type === 'postit'
+                        if (path === 'fontSize') {
+                          const n = Number(value)
+                          setTypeStyle((s) => (forNote ? { ...s, noteFontSize: n } : { ...s, fontSize: n }))
+                        }
                         if (path === 'bold') setTypeStyle((s) => ({ ...s, bold: Boolean(value) }))
                         if (path === 'italic') setTypeStyle((s) => ({ ...s, italic: Boolean(value) }))
                         if (path === 'textAlign' && (value === 'left' || value === 'center' || value === 'right')) {
-                          setTypeStyle((s) => ({ ...s, textAlign: value }))
+                          setTypeStyle((s) => (forNote ? { ...s, noteTextAlign: value } : { ...s, textAlign: value }))
                         }
                       }}
                     />

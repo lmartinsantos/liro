@@ -1,7 +1,8 @@
+import { memo } from 'react'
 import { Circle, Group, Line, Rect } from 'react-konva'
 import {
+  connectorPreviewPoints,
   nearestPort,
-  orthogonalRoute,
   resolveEndpoint,
   routeForConnector,
   sideAnchor,
@@ -38,7 +39,7 @@ type Props = {
 
 const PORT_R = 5
 
-export function ConnectorOverlay({
+export const ConnectorOverlay = memo(function ConnectorOverlay({
   objects,
   livePos,
   theme,
@@ -108,7 +109,7 @@ export function ConnectorOverlay({
       {connectFrom && tool === 'connector' ? null : null}
     </Group>
   )
-}
+})
 
 function ConnectorHandles({
   connectorId,
@@ -316,34 +317,7 @@ export function ConnectorPreview({
   hoverTarget?: { obj: BoardObject; side: Side; offset: number } | null
   theme: CanvasTheme
 }) {
-  let pts: number[]
-  if (hoverTarget) {
-    pts = orthogonalRoute(from, hoverTarget.obj, fromSide, hoverTarget.side, {
-      fromOffset,
-      toOffset: hoverTarget.offset,
-    })
-  } else {
-    // Fake target: tiny box at cursor, approach from nearest side
-    const ghost: BoardObject = {
-      id: '_ghost',
-      type: 'rect',
-      x: cursor.x - 1,
-      y: cursor.y - 1,
-      w: 2,
-      h: 2,
-      rotation: 0,
-      z: '0',
-      fill: '',
-      stroke: '',
-      strokeWidth: 0,
-    }
-    const port = nearestPort(ghost, cursor)
-    pts = orthogonalRoute(from, ghost, fromSide, port.side, {
-      fromOffset,
-      toOffset: 0.5,
-      stub: 16,
-    })
-  }
+  const pts = connectorPreviewPoints(from, fromSide, fromOffset, cursor, hoverTarget)
   return (
     <Line
       points={pts}

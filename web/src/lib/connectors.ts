@@ -393,6 +393,49 @@ export function resolveEndpoint(
   }
 }
 
+const routeCache = new WeakMap<BoardObject, { key: string; pts: number[] }>()
+
+function endpointKey(o: BoardObject) {
+  const pts = o.points
+  const tail = pts && pts.length ? `${pts.length}:${pts[0]}:${pts[pts.length - 1]}` : ''
+  return `${o.x},${o.y},${o.w},${o.h},${o.rotation},${tail}`
+}
+
+/** Points for the rubber-band while a connector is being drawn. */
+export function connectorPreviewPoints(
+  from: BoardObject,
+  fromSide: Side,
+  fromOffset: number,
+  cursor: { x: number; y: number },
+  hoverTarget?: { obj: BoardObject; side: Side; offset: number } | null,
+) {
+  if (hoverTarget) {
+    return orthogonalRoute(from, hoverTarget.obj, fromSide, hoverTarget.side, {
+      fromOffset,
+      toOffset: hoverTarget.offset,
+    })
+  }
+  const ghost: BoardObject = {
+    id: '_ghost',
+    type: 'rect',
+    x: cursor.x - 1,
+    y: cursor.y - 1,
+    w: 2,
+    h: 2,
+    rotation: 0,
+    z: '0',
+    fill: '',
+    stroke: '',
+    strokeWidth: 0,
+  }
+  const port = nearestPort(ghost, cursor)
+  return orthogonalRoute(from, ghost, fromSide, port.side, {
+    fromOffset,
+    toOffset: 0.5,
+    stub: 16,
+  })
+}
+
 export function routeForConnector(
   conn: BoardObject,
   objects: Record<string, BoardObject>,
@@ -401,11 +444,16 @@ export function routeForConnector(
   const from = resolveEndpoint(objects, conn.fromId, livePos)
   const to = resolveEndpoint(objects, conn.toId, livePos)
   if (!from || !to) return null
-  return orthogonalRoute(from, to, conn.fromSide ?? 'right', conn.toSide ?? 'left', {
+  const key = `${endpointKey(from)}|${endpointKey(to)}|${conn.fromSide ?? ''}|${conn.toSide ?? ''}|${conn.fromOffset ?? ''}|${conn.toOffset ?? ''}|${conn.points?.join(',') ?? ''}`
+  const cached = routeCache.get(conn)
+  if (cached && cached.key === key) return cached.pts
+  const pts = orthogonalRoute(from, to, conn.fromSide ?? 'right', conn.toSide ?? 'left', {
     fromOffset: conn.fromOffset ?? 0.5,
     toOffset: conn.toOffset ?? 0.5,
     waypoints: conn.points,
   })
+  routeCache.set(conn, { key, pts })
+  return pts
 }
 
 export { SIDES }

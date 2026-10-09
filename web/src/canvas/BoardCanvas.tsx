@@ -1,11 +1,23 @@
 import type Konva from 'konva'
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { Ellipse, Layer, Line, Rect, Stage, Transformer } from 'react-konva'
 import {
-  connectorBounds,
+  arrowHeadPoints,
+  connectorPreviewPoints,
   nearestPort,
+  polylineMidpoint,
   resolveEndpoint,
   routeForConnector,
+  STUB,
   type Port,
 } from '@/lib/connectors'
 import {
@@ -27,11 +39,16 @@ import {
   cssFontWeight,
   displayNoteFontSize,
   isTexty,
+  konvaFontStyle,
+  measureNoteTextHeight,
   NOTE_LINE_HEIGHT,
   NOTE_PAD,
+  noteFontPref,
+  noteTextBox,
   objectFontFamily,
   objectTextAlign,
   titleFontSize,
+  useFontEpoch,
 } from '@/lib/textStyle'
 import { imageFilesFromDataTransfer } from '@/lib/images'
 import { buildMindmapChild, buildMindmapRoot } from '@/lib/mindmap'
@@ -39,10 +56,17 @@ import { GRID_SIZE, type Guide, readSnapEnabled, snapBox, snapResizeBox } from '
 import type { BoardObject, ObjectType, RemoteCursor, Side, Tool } from '@/lib/types'
 import { newId } from '@/lib/utils'
 import { AttachmentsLayer } from './AttachmentsLayer'
-import { ConnectorOverlay, ConnectorPreview } from './ConnectorOverlay'
+import { ConnectorOverlay } from './ConnectorOverlay'
 import { ObjectNode } from './ObjectNode'
 import { RemoteCursors } from './RemoteCursors'
-import { draftFromDrag, isDrawTool, isPathType, objectFromDraft, type Draft } from './shapeGeom'
+import {
+  draftFromDrag,
+  isDrawTool,
+  isPathType,
+  nodeLod,
+  objectFromDraft,
+  type Draft,
+} from './shapeGeom'
 
 type Props = {
   objects: Record<string, BoardObject>
@@ -57,6 +81,7 @@ type Props = {
   onCreateMany?: (objs: BoardObject[]) => void
   onUpdate: (id: string, path: string, value: unknown) => void
   onLiveMove: (id: string, x: number, y: number) => void
+  onCommitPatches?: (patches: { id: string; path: string; value: unknown }[]) => void
   onCursor: (x: number, y: number) => void
   onImages?: (files: File[], at: { x: number; y: number }) => void
   textStyle?: {
@@ -65,6 +90,9 @@ type Props = {
     bold?: boolean
     italic?: boolean
     textAlign?: 'left' | 'center' | 'right'
+    /** Notes default to auto size (unset) and centered text (unset). */
+    noteFontSize?: number
+    noteTextAlign?: 'left' | 'center' | 'right'
   }
   stickerEmoji?: string
   snapEnabled?: boolean
@@ -94,6 +122,7 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
     onCreateMany,
     onUpdate,
     onLiveMove,
+    onCommitPatches,
     onCursor,
     onImages,
     textStyle,
@@ -104,6 +133,7 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
   ref,
 ) {
   const theme = useCanvasTheme()
+  const fontEpoch = useFontEpoch()
   const wrapRef = useRef<HTMLDivElement>(null)
   const stageRef = useRef<Konva.Stage>(null)
   const trRef = useRef<Konva.Transformer>(null)
@@ -112,7 +142,6 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
   const [scale, setScale] = useState(1)
   const [space, setSpace] = useState(false)
   const [panning, setPanning] = useState(false)
-  const [guides, setGuides] = useState<Guide[]>([])
   const snapEnabled = snapEnabledProp ?? readSnapEnabled()
   const snapEnabledRef = useRef(snapEnabled)
   snapEnabledRef.current = snapEnabled
@@ -122,21 +151,78 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
   const [splinePts, setSplinePts] = useState<number[] | null>(null)
   const [editing, setEditing] = useState<string | null>(null)
   const [editText, setEditText] = useState('')
-  const [marquee, setMarquee] = useState<{ x: number; y: number; w: number; h: number } | null>(null)
+  const marqueeRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null)
+  const marqueeNodeRef = useRef<Konva.Rect>(null)
+  const dragLayerRef = useRef<Konva.Layer>(null)
+  const liftedRef = useRef<{ node: Konva.Node; index: number }[]>([])
   const [connectFrom, setConnectFrom] = useState<{
     id: string
     side: Side
     offset: number
   } | null>(null)
-  const [hoverPt, setHoverPt] = useState<{ x: number; y: number } | null>(null)
   const [hoverShapeId, setHoverShapeId] = useState<string | null>(null)
   const lastCursor = useRef(0)
   const lastPosSend = useRef<Record<string, number>>({})
   const moveOrigin = useRef<Record<string, { x: number; y: number }>>({})
   const draggingId = useRef<string | null>(null)
-  const [livePos, setLivePos] = useState<Record<string, { x: number; y: number }>>({})
   const selectedRef = useRef(selectedIds)
   selectedRef.current = selectedIds
+  const objectsRef = useRef(objects)
+  objectsRef.current = objects
+  const toolRef = useRef(tool)
+  toolRef.current = tool
+  const hoverPtRef = useRef<{ x: number; y: number } | null>(null)
+  const hoverShapeIdRef = useRef<string | null>(null)
+  const previewLineRef = useRef<Konva.Line>(null)
+  const previewPtsRef = useRef<number[]>([])
+  const connectFromRef = useRef(connectFrom)
+  connectFromRef.current = connectFrom
+  const onUpdateRef = useRef(onUpdate)
+  onUpdateRef.current = onUpdate
+  const onCreateRef = useRef(onCreate)
+  onCreateRef.current = onCreate
+  const onSelectRef = useRef(onSelect)
+  onSelectRef.current = onSelect
+  const onLiveMoveRef = useRef(onLiveMove)
+  onLiveMoveRef.current = onLiveMove
+  const onCommitRef = useRef(onCommitPatches)
+  onCommitRef.current = onCommitPatches
+  const strokeRef = useRef(stroke)
+  strokeRef.current = stroke
+  const strokeWidthRef = useRef(strokeWidth)
+  strokeWidthRef.current = strokeWidth
+  const livePosRef = useRef<Record<string, { x: number; y: number }>>({})
+  const movingIdsRef = useRef<string[] | null>(null)
+  const dragNodesRef = useRef(new Map<string, Konva.Node>())
+  const dragConnsRef = useRef(
+    new Map<string, { route: Konva.Line | null; head: Konva.Line | null; label: Konva.Text | null }>(),
+  )
+  const connectorsByEndRef = useRef(new Map<string, string[]>())
+  const guideVRef = useRef<Konva.Line>(null)
+  const guideHRef = useRef<Konva.Line>(null)
+  const guideDrawRef = useRef({
+    vOn: false,
+    hOn: false,
+    vPts: [0, 0, 0, 0] as number[],
+    hPts: [0, 0, 0, 0] as number[],
+  })
+  const viewRef = useRef({ x: 0, y: 0, w: 1, h: 1 })
+  const scaleRef = useRef(scale)
+  scaleRef.current = scale
+  const contentLayerRef = useRef<Konva.Layer>(null)
+  // Live stage transform; ahead of pos/scale state while a pan or wheel gesture is running.
+  const txRef = useRef({ x: pos.x, y: pos.y, scale })
+  const gestureRef = useRef(false)
+  const viewRafRef = useRef(0)
+  const wheelTimerRef = useRef(0)
+  if (!gestureRef.current) txRef.current = { x: pos.x, y: pos.y, scale }
+  const editingRef = useRef(editing)
+  editingRef.current = editing
+  const paintGuidesRef = useRef<(guides: Guide[]) => void>(() => {})
+  const paintPreviewRef = useRef<() => void>(() => {})
+  const paintMarqueeRef = useRef<(m: { x: number; y: number; w: number; h: number } | null) => void>(
+    () => {},
+  )
 
   const selectedId = selectedIds.length === 1 ? selectedIds[0] : null
   const multiSelect = selectedIds.length > 1
@@ -160,7 +246,12 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
   }, [])
 
   useEffect(() => {
-    if (tool !== 'connector') setConnectFrom(null)
+    if (tool !== 'connector') {
+      setConnectFrom(null)
+      hoverShapeIdRef.current = null
+      setHoverShapeId(null)
+      previewPtsRef.current = []
+    }
   }, [tool])
 
   useEffect(() => {
@@ -209,13 +300,27 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
     [pos.x, pos.y, scale, size.w, size.h],
   )
 
+  const endGesture = () => {
+    window.clearTimeout(wheelTimerRef.current)
+    wheelTimerRef.current = 0
+    if (viewRafRef.current) cancelAnimationFrame(viewRafRef.current)
+    viewRafRef.current = 0
+    if (gestureRef.current) {
+      gestureRef.current = false
+      contentLayerRef.current?.listening(true)
+    }
+  }
+
   useImperativeHandle(
     ref,
     () => ({
-      viewCenter: () => ({
-        x: view.x + view.w / 2,
-        y: view.y + view.h / 2,
-      }),
+      viewCenter: () => {
+        const tx = txRef.current
+        return {
+          x: (size.w / 2 - tx.x) / tx.scale,
+          y: (size.h / 2 - tx.y) / tx.scale,
+        }
+      },
       fitObjects: (objs, pad = 48) => {
         const boxes = Object.values(objs)
           .filter((o) => o.type !== 'connector')
@@ -227,6 +332,7 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
           MIN_SCALE,
           MAX_SCALE,
         )
+        endGesture()
         setScale(next)
         setPos({
           x: size.w / 2 - (box.x + box.w / 2) * next,
@@ -234,31 +340,260 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
         })
       },
     }),
-    [view, size.w, size.h],
+    [size.w, size.h],
   )
 
+  viewRef.current = view
+
+  const connectorsByEnd = useMemo(() => {
+    const map = new Map<string, string[]>()
+    for (const o of Object.values(objects)) {
+      if (o.type !== 'connector') continue
+      if (o.fromId) {
+        const list = map.get(o.fromId)
+        if (list) list.push(o.id)
+        else map.set(o.fromId, [o.id])
+      }
+      if (o.toId && o.toId !== o.fromId) {
+        const list = map.get(o.toId)
+        if (list) list.push(o.id)
+        else map.set(o.toId, [o.id])
+      }
+    }
+    return map
+  }, [objects])
+  connectorsByEndRef.current = connectorsByEnd
+
   const visible = useMemo(() => {
+    // Overscan so content revealed by a running pan/zoom is already mounted.
+    const cull = {
+      x: view.x - view.w / 2,
+      y: view.y - view.h / 2,
+      w: view.w * 2,
+      h: view.h * 2,
+    }
     return Object.values(objects)
       .filter((o) => {
         if (o.type === 'connector') {
-          const pts = routeForConnector(o, objects, livePos)
-          if (!pts) return false
-          return intersectsView(o, view, 80, connectorBounds(pts))
+          const box = connectorCullBox(o, objects)
+          if (!box) return false
+          return intersectsView(o, cull, 80 + STUB, box)
         }
-        const live = livePos[o.id]
-        if (live) return intersectsView(o, view, 80, objectAABB({ ...o, ...live }))
-        return intersectsView(o, view)
+        return intersectsView(o, cull)
       })
       .sort(renderOrder)
-  }, [objects, view, livePos])
+  }, [objects, view])
+  const withAttachments = useMemo(() => visible.filter((o) => o.attachments?.length), [visible])
 
-  const toBoard = useCallback(
-    (sx: number, sy: number) => ({
-      x: (sx - pos.x) / scale,
-      y: (sy - pos.y) / scale,
-    }),
-    [pos.x, pos.y, scale],
+  const paintGuides = (guides: Guide[]) => {
+    const frame = viewRef.current
+    const sc = scaleRef.current
+    const span = Math.max(frame.w, frame.h) * 2
+    const sw = Math.max(1, 1 / sc)
+    const dash = [6 / sc, 4 / sc]
+    const v = guides.find((g) => g.orientation === 'v')
+    const h = guides.find((g) => g.orientation === 'h')
+    const draw = guideDrawRef.current
+    const vLine = guideVRef.current
+    const hLine = guideHRef.current
+    if (v) {
+      draw.vOn = true
+      draw.vPts = [v.position, frame.y - span, v.position, frame.y + frame.h + span]
+      if (vLine) {
+        vLine.visible(true)
+        vLine.points(draw.vPts)
+        vLine.strokeWidth(sw)
+        vLine.dash(dash)
+      }
+    } else if (draw.vOn) {
+      draw.vOn = false
+      vLine?.visible(false)
+    }
+    if (h) {
+      draw.hOn = true
+      draw.hPts = [frame.x - span, h.position, frame.x + frame.w + span, h.position]
+      if (hLine) {
+        hLine.visible(true)
+        hLine.points(draw.hPts)
+        hLine.strokeWidth(sw)
+        hLine.dash(dash)
+      }
+    } else if (draw.hOn) {
+      draw.hOn = false
+      hLine?.visible(false)
+    }
+    ;(vLine ?? hLine)?.getLayer()?.batchDraw()
+  }
+  paintGuidesRef.current = paintGuides
+
+  const paintMarquee = (m: { x: number; y: number; w: number; h: number } | null) => {
+    marqueeRef.current = m
+    const node = marqueeNodeRef.current
+    if (!node) return
+    if (!m) {
+      if (!node.visible()) return
+      node.visible(false)
+    } else {
+      const sc = txRef.current.scale
+      node.setAttrs({
+        visible: true,
+        x: m.x,
+        y: m.y,
+        width: m.w,
+        height: m.h,
+        strokeWidth: Math.max(1, 1.5 / sc),
+        dash: [6 / sc, 4 / sc],
+      })
+    }
+    node.getLayer()?.batchDraw()
+  }
+  paintMarqueeRef.current = paintMarquee
+
+  const paintConnectorPreview = () => {
+    const line = previewLineRef.current
+    const from = connectFromRef.current
+    const pt = hoverPtRef.current
+    if (!from || !pt) {
+      previewPtsRef.current = []
+      if (line) {
+        line.visible(false)
+        line.getLayer()?.batchDraw()
+      }
+      return
+    }
+    const objs = objectsRef.current
+    const fromObj = resolveEndpoint(objs, from.id, livePosRef.current)
+    if (!fromObj || fromObj.type === 'connector') {
+      previewPtsRef.current = []
+      line?.visible(false)
+      return
+    }
+    const hoverId = hoverShapeIdRef.current
+    let hoverTarget: { obj: (typeof fromObj); side: Side; offset: number } | null = null
+    if (hoverId && hoverId !== from.id) {
+      const target = resolveEndpoint(objs, hoverId, livePosRef.current)
+      if (target && target.type !== 'connector') {
+        const port = nearestPort(target, pt)
+        hoverTarget = { obj: target, side: port.side, offset: port.offset }
+      }
+    }
+    const pts = connectorPreviewPoints(fromObj, from.side, from.offset, pt, hoverTarget)
+    previewPtsRef.current = pts
+    if (!line) return
+    line.visible(pts.length >= 4)
+    line.points(pts)
+    line.getLayer()?.batchDraw()
+  }
+  paintPreviewRef.current = paintConnectorPreview
+
+  useEffect(() => {
+    paintPreviewRef.current()
+  }, [connectFrom, hoverShapeId, objects])
+
+  const toBoard = useCallback((sx: number, sy: number) => {
+    const tx = txRef.current
+    return {
+      x: (sx - tx.x) / tx.scale,
+      y: (sy - tx.y) / tx.scale,
+    }
+  }, [])
+
+  /** Hide mounted (overscanned) nodes outside the live viewport so Konva skips drawing them. */
+  const cullMounted = () => {
+    const layer = contentLayerRef.current
+    const stage = stageRef.current
+    if (!layer || !stage) return false
+    let changed = false
+    const tx = txRef.current
+    const live = {
+      x: -tx.x / tx.scale,
+      y: -tx.y / tx.scale,
+      w: stage.width() / tx.scale,
+      h: stage.height() / tx.scale,
+    }
+    const objs = objectsRef.current
+    const selected = selectedRef.current
+    for (const child of layer.getChildren()) {
+      const id = child.id()
+      const obj = id ? objs[id] : undefined
+      if (!obj) continue
+      let on = true
+      if (obj.type !== 'connector' && !selected.includes(id)) {
+        const box = objectAABB(obj)
+        box.x += child.x() - obj.x
+        box.y += child.y() - obj.y
+        on = intersectsView(obj, live, obj.rotation ? Math.max(obj.w, obj.h) : 40, box)
+      }
+      if (child.visible() !== on) {
+        child.visible(on)
+        changed = true
+      }
+    }
+    return changed
+  }
+
+  const applyView = () => {
+    viewRafRef.current = 0
+    const stage = stageRef.current
+    const tx = txRef.current
+    if (stage) {
+      stage.position({ x: tx.x, y: tx.y })
+      stage.scale({ x: tx.scale, y: tx.scale })
+      cullMounted()
+      stage.batchDraw()
+    }
+    const el = wrapRef.current
+    if (el) {
+      const grid = GRID_SIZE * tx.scale
+      el.style.backgroundSize = `${grid}px ${grid}px`
+      el.style.backgroundPosition = `${tx.x}px ${tx.y}px`
+    }
+  }
+
+  const commitView = () => {
+    window.clearTimeout(wheelTimerRef.current)
+    wheelTimerRef.current = 0
+    if (!gestureRef.current) return
+    if (viewRafRef.current) {
+      cancelAnimationFrame(viewRafRef.current)
+      applyView()
+    }
+    gestureRef.current = false
+    const layer = contentLayerRef.current
+    if (layer) {
+      layer.listening(true)
+      layer.batchDraw()
+    }
+    const tx = txRef.current
+    setPos({ x: tx.x, y: tx.y })
+    setScale(tx.scale)
+  }
+
+  /** Move the stage to `next` on the next frame; React state catches up in commitView. */
+  const moveView = (next: { x: number; y: number; scale: number }) => {
+    txRef.current = next
+    if (!gestureRef.current) {
+      gestureRef.current = true
+      contentLayerRef.current?.listening(false)
+    }
+    if (editingRef.current) {
+      commitView()
+      return
+    }
+    if (!viewRafRef.current) viewRafRef.current = requestAnimationFrame(applyView)
+  }
+
+  useEffect(
+    () => () => {
+      window.clearTimeout(wheelTimerRef.current)
+      cancelAnimationFrame(viewRafRef.current)
+    },
+    [],
   )
+
+  useLayoutEffect(() => {
+    if (cullMounted()) contentLayerRef.current?.batchDraw()
+  }, [visible, selectedIds, size.w, size.h])
 
   const refreshTransformer = useCallback(() => {
     const tr = trRef.current
@@ -318,40 +653,11 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
   const pickPort = (shapeId: string, port: Port) => {
     if (tool !== 'connector') return
     if (!connectFrom) {
+      previewPtsRef.current = []
       setConnectFrom({ id: shapeId, side: port.side, offset: port.offset })
       return
     }
     finishConnect(connectFrom, { id: shapeId, side: port.side, offset: port.offset })
-  }
-
-  const pickObject = (id: string, shift: boolean) => {
-    if (tool === 'connector') {
-      const target = objects[id]
-      if (!target || target.type === 'connector') {
-        setConnectFrom(null)
-        return
-      }
-      const pt = hoverPt ?? { x: target.x + target.w / 2, y: target.y + target.h / 2 }
-      const port = nearestPort(target, pt)
-      if (!connectFrom) {
-        setConnectFrom({ id, side: port.side, offset: port.offset })
-        return
-      }
-      finishConnect(connectFrom, { id, side: port.side, offset: port.offset })
-      return
-    }
-    const pickId = shift ? id : groupRoot(id, objects)
-    if (shift) {
-      const next = selectedRef.current.includes(pickId)
-        ? selectedRef.current.filter((x) => x !== pickId)
-        : [...selectedRef.current, pickId]
-      onSelect(next)
-      return
-    }
-    // Keep multi-select when clicking an already-selected item (drag the selection).
-    if (selectedRef.current.includes(pickId) && selectedRef.current.length > 1) return
-    if (selectedRef.current.includes(id) && selectedRef.current.length > 1) return
-    onSelect([pickId])
   }
 
   const rewireConnector = (
@@ -372,6 +678,20 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
     }
     onUpdate(connectorId, 'points', [])
   }
+
+  const pickPortRef = useRef(pickPort)
+  pickPortRef.current = pickPort
+  const rewireRef = useRef(rewireConnector)
+  rewireRef.current = rewireConnector
+  const handlePortClick = useCallback((shapeId: string, port: Port) => {
+    pickPortRef.current(shapeId, port)
+  }, [])
+  const handleRewire = useCallback(
+    (connectorId: string, end: 'from' | 'to', target: { id: string; side: Side; offset: number }) => {
+      rewireRef.current(connectorId, end, target)
+    },
+    [],
+  )
 
   const finishDraft = (d: Draft | null) => {
     if (!d) return
@@ -403,10 +723,10 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
       strokeWidth: isNote || isFrame || isLane ? 1 : strokeWidth,
       text: isNote ? '' : isFrame ? 'Frame' : isLane ? 'Lane' : undefined,
       fontFamily: isNote ? textStyle?.fontFamily : undefined,
-      fontSize: isNote ? textStyle?.fontSize : undefined,
+      fontSize: isNote ? textStyle?.noteFontSize || undefined : undefined,
       bold: isNote ? textStyle?.bold : undefined,
       italic: isNote ? textStyle?.italic : undefined,
-      textAlign: isNote ? textStyle?.textAlign : undefined,
+      textAlign: isNote ? textStyle?.noteTextAlign : undefined,
     }
     if (isLane) extras.dir = 'h'
     const selectedFrame = selectedRef.current
@@ -594,7 +914,7 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
         setSplinePts(null)
         setEditing(null)
         setConnectFrom(null)
-        setMarquee(null)
+        paintMarqueeRef.current(null)
         onSelect([])
       }
     }
@@ -608,17 +928,20 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
     if (!stage) return
     const pointer = stage.getPointerPosition()
     if (!pointer) return
-    const old = scale
+    const tx = txRef.current
+    const old = tx.scale
     const next = clamp(old * (e.evt.deltaY > 0 ? 0.92 : 1.08), MIN_SCALE, MAX_SCALE)
     const mouse = {
-      x: (pointer.x - pos.x) / old,
-      y: (pointer.y - pos.y) / old,
+      x: (pointer.x - tx.x) / old,
+      y: (pointer.y - tx.y) / old,
     }
-    setScale(next)
-    setPos({
+    moveView({
       x: pointer.x - mouse.x * next,
       y: pointer.y - mouse.y * next,
+      scale: next,
     })
+    window.clearTimeout(wheelTimerRef.current)
+    wheelTimerRef.current = window.setTimeout(commitView, 120)
   }
 
   const onMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
@@ -627,7 +950,12 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
     const middle = e.evt.button === 1
     if (readOnly || space || middle) {
       setPanning(true)
-      panRef.current = { x: pos.x, y: pos.y, px: e.evt.clientX, py: e.evt.clientY }
+      panRef.current = {
+        x: txRef.current.x,
+        y: txRef.current.y,
+        px: e.evt.clientX,
+        py: e.evt.clientY,
+      }
       return
     }
     if (tool === 'text') {
@@ -659,7 +987,7 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
     }
     if (e.target === e.target.getStage()) {
       dragStart.current = pt
-      setMarquee({ x: pt.x, y: pt.y, w: 0, h: 0 })
+      paintMarquee({ x: pt.x, y: pt.y, w: 0, h: 0 })
     }
   }
 
@@ -667,24 +995,28 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
     const pt = pointerBoard()
     if (pt && !readOnly) {
       emitCursor(pt)
-      setHoverPt(pt)
+      hoverPtRef.current = pt
       if (tool === 'connector') {
-        const hit = hitTop(pt.x, pt.y, objects)
-        setHoverShapeId(hit && hit.type !== 'connector' ? hit.id : null)
-      } else {
-        setHoverShapeId(null)
+        const hit = hitTop(pt.x, pt.y, objectsRef.current)
+        const next = hit && hit.type !== 'connector' ? hit.id : null
+        if (next !== hoverShapeIdRef.current) {
+          hoverShapeIdRef.current = next
+          setHoverShapeId(next)
+        }
+        paintPreviewRef.current()
       }
     }
     if (panning && panRef.current) {
-      setPos({
+      moveView({
         x: panRef.current.x + (e.evt.clientX - panRef.current.px),
         y: panRef.current.y + (e.evt.clientY - panRef.current.py),
+        scale: txRef.current.scale,
       })
       return
     }
     if (readOnly) return
-    if (marquee && dragStart.current && pt) {
-      setMarquee({
+    if (marqueeRef.current && dragStart.current && pt) {
+      paintMarquee({
         x: Math.min(dragStart.current.x, pt.x),
         y: Math.min(dragStart.current.y, pt.y),
         w: Math.abs(pt.x - dragStart.current.x),
@@ -701,7 +1033,9 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
     if (panning) {
       setPanning(false)
       panRef.current = null
+      commitView()
     }
+    const marquee = marqueeRef.current
     if (marquee) {
       if (marquee.w > 6 || marquee.h > 6) {
         const hits = [
@@ -715,7 +1049,7 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
       } else {
         onSelect([])
       }
-      setMarquee(null)
+      paintMarquee(null)
     }
     if (draft && tool !== 'spline') {
       finishDraft(draft)
@@ -728,97 +1062,244 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
     if (splinePts) commitSpline(splinePts)
   }
 
-  const movingIds = (id: string) => {
+  const ensureMoving = (id: string) => {
+    if (movingIdsRef.current) return movingIdsRef.current
+    const objs = objectsRef.current
     const selected = selectedRef.current
     // Multi-select drag: move the whole selection (and each item's descendants).
-    if (selected.includes(id) && selected.length > 1) return moveSet(selected, objects)
     // Group members drag as the group; frames/lanes still move via moveSet(descendants).
-    return moveSet([groupRoot(id, objects)], objects)
+    const ids =
+      selected.includes(id) && selected.length > 1
+        ? moveSet(selected, objs)
+        : moveSet([groupRoot(id, objs)], objs)
+    movingIdsRef.current = ids
+    for (const mid of ids) {
+      const o = objs[mid]
+      if (o && !moveOrigin.current[mid]) moveOrigin.current[mid] = { x: o.x, y: o.y }
+    }
+    liftToDragLayer(ids)
+    return ids
   }
 
-  const handleChange = (id: string, patch: Partial<BoardObject>) => {
+  /** Draw moving shapes (and their connectors) on their own layer so the static notes paint once. */
+  const liftToDragLayer = (ids: string[]) => {
+    const content = contentLayerRef.current
+    const dragLayer = dragLayerRef.current
+    if (!content || !dragLayer || liftedRef.current.length) return
+    const lift = new Set(ids)
+    for (const id of ids) {
+      for (const cid of connectorsByEndRef.current.get(id) ?? []) lift.add(cid)
+    }
+    const lifted: { node: Konva.Node; index: number }[] = []
+    for (const child of content.getChildren()) {
+      if (lift.has(child.id())) lifted.push({ node: child, index: child.zIndex() })
+    }
+    lifted.sort((a, b) => a.index - b.index)
+    for (const { node } of lifted) node.moveTo(dragLayer)
+    liftedRef.current = lifted
+    content.batchDraw()
+  }
+
+  const dropFromDragLayer = () => {
+    const content = contentLayerRef.current
+    const lifted = liftedRef.current
+    liftedRef.current = []
+    if (!content || !lifted.length) return
+    for (const { node, index } of lifted) {
+      if (!node.getParent()) continue
+      node.moveTo(content)
+      node.zIndex(Math.min(index, content.getChildren().length - 1))
+    }
+    content.batchDraw()
+    dragLayerRef.current?.batchDraw()
+  }
+
+  const clearDrag = () => {
+    dropFromDragLayer()
+    movingIdsRef.current = null
+    livePosRef.current = {}
+    dragNodesRef.current.clear()
+    dragConnsRef.current.clear()
+    draggingId.current = null
+    moveOrigin.current = {}
+    paintGuidesRef.current([])
+  }
+
+  const commitPatches = (patches: { id: string; path: string; value: unknown }[]) => {
+    if (!patches.length) return
+    const commit = onCommitRef.current
+    if (commit) {
+      commit(patches)
+      return
+    }
+    for (const p of patches) onUpdateRef.current(p.id, p.path, p.value)
+  }
+
+  const paintMovedConnectors = (ids: string[], preview: Record<string, { x: number; y: number }>) => {
+    const stage = stageRef.current
+    const objs = objectsRef.current
+    const seen = new Set<string>()
+    for (const mid of ids) {
+      const list = connectorsByEndRef.current.get(mid)
+      if (!list) continue
+      for (const cid of list) {
+        if (seen.has(cid)) continue
+        seen.add(cid)
+        const conn = objs[cid]
+        if (!conn) continue
+        const pts = routeForConnector(conn, objs, preview)
+        if (!pts) continue
+        let nodes = dragConnsRef.current.get(cid)
+        if (!nodes) {
+          nodes = {
+            route: (stage?.findOne('#route-' + cid) as Konva.Line | undefined) ?? null,
+            head: (stage?.findOne('#head-' + cid) as Konva.Line | undefined) ?? null,
+            label: (stage?.findOne('#label-' + cid) as Konva.Text | undefined) ?? null,
+          }
+          dragConnsRef.current.set(cid, nodes)
+        }
+        nodes.route?.points(pts)
+        const head = arrowHeadPoints(pts, 10)
+        if (nodes.head) {
+          if (head) {
+            nodes.head.visible(true)
+            nodes.head.points(head)
+          } else {
+            nodes.head.visible(false)
+          }
+        }
+        if (nodes.label) {
+          const mid = polylineMidpoint(pts)
+          nodes.label.position({ x: mid.x + 6, y: mid.y - 8 })
+        }
+      }
+    }
+  }
+
+  const pickImpl = useRef<(id: string, shift: boolean) => void>(() => {})
+  const changeImpl = useRef<(id: string, patch: Partial<BoardObject>) => void>(() => {})
+  const liveImpl = useRef<(id: string, x: number, y: number) => void>(() => {})
+  const editImpl = useRef<(id: string) => void>(() => {})
+
+  pickImpl.current = (id, shift) => {
+    const objs = objectsRef.current
+    if (toolRef.current === 'connector') {
+      const target = objs[id]
+      if (!target || target.type === 'connector') {
+        setConnectFrom(null)
+        return
+      }
+      const pt = hoverPtRef.current ?? { x: target.x + target.w / 2, y: target.y + target.h / 2 }
+      const port = nearestPort(target, pt)
+      const from = connectFromRef.current
+      if (!from) {
+        previewPtsRef.current = []
+        setConnectFrom({ id, side: port.side, offset: port.offset })
+        return
+      }
+      finishConnect(from, { id, side: port.side, offset: port.offset })
+      return
+    }
+    const pickId = shift ? id : groupRoot(id, objs)
+    if (shift) {
+      const next = selectedRef.current.includes(pickId)
+        ? selectedRef.current.filter((x) => x !== pickId)
+        : [...selectedRef.current, pickId]
+      onSelectRef.current(next)
+      return
+    }
+    if (selectedRef.current.includes(pickId) && selectedRef.current.length > 1) return
+    if (selectedRef.current.includes(id) && selectedRef.current.length > 1) return
+    onSelectRef.current([pickId])
+  }
+
+  changeImpl.current = (id, patch) => {
+    const objs = objectsRef.current
     if ('x' in patch && 'y' in patch && !('w' in patch)) {
-      const origin = moveOrigin.current[id] ?? { x: objects[id]?.x ?? 0, y: objects[id]?.y ?? 0 }
-      const dragged = objects[id]
+      const origin = moveOrigin.current[id] ?? { x: objs[id]?.x ?? 0, y: objs[id]?.y ?? 0 }
+      const dragged = objs[id]
       const raw = { x: patch.x ?? 0, y: patch.y ?? 0 }
-      const ids = movingIds(id)
+      const ids = movingIdsRef.current ?? ensureMoving(id)
       const exclude = new Set(ids)
       const snapped = snapBox(
         { x: raw.x, y: raw.y, w: dragged?.w ?? 1, h: dragged?.h ?? 1 },
-        { enabled: snapEnabledRef.current, objects, exclude, grid: GRID_SIZE },
+        { enabled: snapEnabledRef.current, objects: objs, exclude, grid: GRID_SIZE },
       )
       const dx = snapped.x - origin.x
       const dy = snapped.y - origin.y
+      const patches: { id: string; path: string; value: unknown }[] = []
       for (const mid of ids) {
-        const start = moveOrigin.current[mid] ?? { x: objects[mid]?.x ?? 0, y: objects[mid]?.y ?? 0 }
+        const start = moveOrigin.current[mid] ?? { x: objs[mid]?.x ?? 0, y: objs[mid]?.y ?? 0 }
         const nx = start.x + dx
         const ny = start.y + dy
-        onUpdate(mid, 'x', nx)
-        onUpdate(mid, 'y', ny)
-        const o = objects[mid]
+        patches.push({ id: mid, path: 'x', value: nx }, { id: mid, path: 'y', value: ny })
+        const o = objs[mid]
         if (!o || o.type === 'frame' || o.type === 'group' || o.type === 'connector') continue
-        const nextParent = parentAfterMove(o, nx + o.w / 2, ny + o.h / 2, objects, exclude)
-        if ((o.parentId ?? '') !== nextParent) onUpdate(mid, 'parentId', nextParent)
+        const nextParent = parentAfterMove(o, nx + o.w / 2, ny + o.h / 2, objs, exclude)
+        if ((o.parentId ?? '') !== nextParent) patches.push({ id: mid, path: 'parentId', value: nextParent })
       }
-      moveOrigin.current = {}
-      draggingId.current = null
-      setLivePos({})
-      setGuides([])
+      commitPatches(patches)
+      clearDrag()
       return
     }
     if ('x' in patch && 'y' in patch && ('w' in patch || 'h' in patch)) {
       const exclude = new Set([id])
       const snapped = snapResizeBox(
         {
-          x: patch.x ?? objects[id]?.x ?? 0,
-          y: patch.y ?? objects[id]?.y ?? 0,
-          w: patch.w ?? objects[id]?.w ?? 8,
-          h: patch.h ?? objects[id]?.h ?? 8,
+          x: patch.x ?? objs[id]?.x ?? 0,
+          y: patch.y ?? objs[id]?.y ?? 0,
+          w: patch.w ?? objs[id]?.w ?? 8,
+          h: patch.h ?? objs[id]?.h ?? 8,
         },
-        { enabled: snapEnabledRef.current, objects, exclude, grid: GRID_SIZE },
+        { enabled: snapEnabledRef.current, objects: objs, exclude, grid: GRID_SIZE },
       )
-      onUpdate(id, 'x', snapped.box.x)
-      onUpdate(id, 'y', snapped.box.y)
-      onUpdate(id, 'w', snapped.box.w)
-      onUpdate(id, 'h', snapped.box.h)
-      if ('rotation' in patch) onUpdate(id, 'rotation', patch.rotation)
-      setGuides([])
+      const patches: { id: string; path: string; value: unknown }[] = [
+        { id, path: 'x', value: snapped.box.x },
+        { id, path: 'y', value: snapped.box.y },
+        { id, path: 'w', value: snapped.box.w },
+        { id, path: 'h', value: snapped.box.h },
+      ]
+      if ('rotation' in patch) patches.push({ id, path: 'rotation', value: patch.rotation })
+      commitPatches(patches)
+      paintGuidesRef.current([])
       return
     }
-    for (const [k, v] of Object.entries(patch)) {
-      onUpdate(id, k, v)
-    }
+    const patches = Object.entries(patch).map(([path, value]) => ({ id, path, value }))
+    commitPatches(patches)
   }
 
-  const handleLiveMove = (id: string, x: number, y: number) => {
+  liveImpl.current = (id, x, y) => {
     draggingId.current = id
-    if (!moveOrigin.current[id] && objects[id]) {
-      for (const mid of movingIds(id)) {
-        const o = objects[mid]
-        if (o) moveOrigin.current[mid] = { x: o.x, y: o.y }
-      }
-    }
-    const origin = moveOrigin.current[id] ?? { x: objects[id]?.x ?? 0, y: objects[id]?.y ?? 0 }
-    const dragged = objects[id]
-    const ids = movingIds(id)
+    const objs = objectsRef.current
+    const ids = ensureMoving(id)
+    const origin = moveOrigin.current[id] ?? { x: objs[id]?.x ?? 0, y: objs[id]?.y ?? 0 }
+    const dragged = objs[id]
     const exclude = new Set(ids)
     const snapped = snapBox(
       { x, y, w: dragged?.w ?? 1, h: dragged?.h ?? 1 },
-      { enabled: snapEnabledRef.current, objects, exclude, grid: GRID_SIZE },
+      { enabled: snapEnabledRef.current, objects: objs, exclude, grid: GRID_SIZE },
     )
-    setGuides(snapped.guides)
+    paintGuidesRef.current(snapped.guides)
     const dx = snapped.x - origin.x
     const dy = snapped.y - origin.y
     const preview: Record<string, { x: number; y: number }> = {}
     const stage = stageRef.current
     for (const mid of ids) {
-      const start = moveOrigin.current[mid] ?? { x: objects[mid]?.x ?? 0, y: objects[mid]?.y ?? 0 }
+      const start = moveOrigin.current[mid] ?? { x: objs[mid]?.x ?? 0, y: objs[mid]?.y ?? 0 }
       const next = { x: start.x + dx, y: start.y + dy }
       preview[mid] = next
-      const node = stage?.findOne('#' + mid)
+      let node = dragNodesRef.current.get(mid)
+      if (!node) {
+        const found = stage?.findOne('#' + mid)
+        if (found) {
+          node = found
+          dragNodesRef.current.set(mid, found)
+        }
+      }
       node?.position(next)
     }
-    setLivePos(preview)
+    livePosRef.current = preview
+    paintMovedConnectors(ids, preview)
     refreshTransformer()
 
     const pt = pointerBoard()
@@ -828,17 +1309,33 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
     if (now - (lastPosSend.current[id] ?? 0) < 50) return
     lastPosSend.current[id] = now
     for (const mid of ids) {
-      onLiveMove(mid, preview[mid].x, preview[mid].y)
+      onLiveMoveRef.current(mid, preview[mid].x, preview[mid].y)
     }
   }
 
-  const startEdit = (id: string) => {
-    const obj = objects[id]
+  editImpl.current = (id) => {
+    const obj = objectsRef.current[id]
     if (!obj) return
     setEditing(id)
     setEditText(obj.text ?? '')
-    onSelect([id])
+    onSelectRef.current([id])
   }
+
+  const pickObject = useCallback((id: string, shift: boolean) => {
+    pickImpl.current(id, shift)
+  }, [])
+
+  const handleChange = useCallback((id: string, patch: Partial<BoardObject>) => {
+    changeImpl.current(id, patch)
+  }, [])
+
+  const handleLiveMove = useCallback((id: string, x: number, y: number) => {
+    liveImpl.current(id, x, y)
+  }, [])
+
+  const startEdit = useCallback((id: string) => {
+    editImpl.current(id)
+  }, [])
 
   const commitEdit = () => {
     if (editing) {
@@ -873,7 +1370,7 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
           h: editObj.h,
           text: editText,
           fontFamily: objectFontFamily(editObj),
-          fontSize: editObj.fontSize,
+          fontSize: noteFontPref(editObj),
           bold: editObj.bold,
           italic: editObj.italic,
         })
@@ -882,6 +1379,18 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
         : editObj
           ? titleFontSize(editObj)
           : 15
+  const notePadTop = (() => {
+    if (editObj?.type !== 'postit') return 0
+    const box = noteTextBox(editObj.w, editObj.h)
+    const textH = measureNoteTextHeight(
+      editText || ' ',
+      box.width,
+      liveFont,
+      objectFontFamily(editObj),
+      konvaFontStyle(editObj),
+    )
+    return Math.max(0, (box.height - textH) / 2)
+  })()
   const editStyle = editObj
     ? {
         left: pos.x + editObj.x * scale + (editObj.type === 'text' ? 0 : NOTE_PAD.x * scale),
@@ -902,13 +1411,12 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
               : (editObj.h - NOTE_PAD.yTotal) * scale,
         ),
         fontSize: liveFont * scale,
+        paddingTop: notePadTop * scale,
       }
     : null
 
   const gridSize = GRID_SIZE * scale
   const gridPos = `${pos.x}px ${pos.y}px`
-  const guideSpan = Math.max(view.w, view.h) * 2
-  const fromObj = connectFrom ? resolveEndpoint(objects, connectFrom.id, livePos) : null
   const selectedConnectorId =
     selectedId && objects[selectedId]?.type === 'connector' ? selectedId : null
   const portShapeIds = useMemo(() => {
@@ -919,14 +1427,13 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
     }
     return [...ids]
   }, [tool, hoverShapeId, connectFrom])
-
-  const hoverConnectTarget = useMemo(() => {
-    if (!connectFrom || !hoverShapeId || hoverShapeId === connectFrom.id || !hoverPt) return null
-    const obj = resolveEndpoint(objects, hoverShapeId, livePos)
-    if (!obj || obj.type === 'connector') return null
-    const port = nearestPort(obj, hoverPt)
-    return { obj, side: port.side, offset: port.offset }
-  }, [connectFrom, hoverShapeId, hoverPt, objects, livePos])
+  const nodeListening =
+    readOnly
+      ? false
+      : tool === 'select' || tool === 'connector' || tool === 'mindmap'
+        ? !space && !editing
+        : false
+  const nodeDraggable = !readOnly && tool === 'select' && !space && !editing
 
   return (
     <div
@@ -971,25 +1478,19 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
         onMouseLeave={onMouseUp}
         onDblClick={onDblClick}
       >
-        <Layer>
+        <Layer ref={contentLayerRef}>
           {visible.map((obj) => (
             <ObjectNode
               key={obj.id}
               obj={obj}
               objects={objects}
               selected={selectedIds.includes(obj.id)}
-              listening={
-                readOnly
-                  ? false
-                  : tool === 'select' || tool === 'connector' || tool === 'mindmap'
-                    ? !space && !editing
-                    : false
-              }
-              draggable={!readOnly && tool === 'select' && !space && !editing}
+              listening={nodeListening}
+              draggable={nodeDraggable}
               theme={theme}
               editing={editing === obj.id}
-              preview={draggingId.current === obj.id ? undefined : livePos[obj.id]}
-              livePos={livePos}
+              lod={nodeLod(obj, scale)}
+              fontEpoch={fontEpoch}
               onSelect={pickObject}
               onChange={handleChange}
               onLiveMove={handleLiveMove}
@@ -997,6 +1498,9 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
               onLiveTransform={refreshTransformer}
             />
           ))}
+        </Layer>
+        <Layer ref={dragLayerRef} />
+        <Layer>
           {draft && (
             <DraftNode
               draft={draft}
@@ -1017,42 +1521,38 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
               listening={false}
             />
           )}
-          {marquee && (
-            <Rect
-              x={marquee.x}
-              y={marquee.y}
-              width={marquee.w}
-              height={marquee.h}
-              fill={theme.selectFill}
+          <Rect
+            ref={marqueeNodeRef}
+            visible={false}
+            fill={theme.selectFill}
+            stroke={theme.select}
+            listening={false}
+          />
+          {connectFrom && !readOnly && (
+            <Line
+              ref={previewLineRef}
+              points={previewPtsRef.current}
+              visible={previewPtsRef.current.length >= 4}
               stroke={theme.select}
-              strokeWidth={Math.max(1, 1.5 / scale)}
-              dash={[6 / scale, 4 / scale]}
+              strokeWidth={2}
+              dash={[8, 6]}
               listening={false}
-            />
-          )}
-          {fromObj && connectFrom && hoverPt && !readOnly && (
-            <ConnectorPreview
-              from={fromObj}
-              fromSide={connectFrom.side}
-              fromOffset={connectFrom.offset}
-              cursor={hoverPt}
-              hoverTarget={hoverConnectTarget}
-              theme={theme}
+              lineJoin="round"
+              lineCap="round"
             />
           )}
           {!readOnly && (
             <ConnectorOverlay
               objects={objects}
-              livePos={livePos}
               theme={theme}
-              scale={scale}
+              scale={tool === 'connector' || selectedConnectorId ? scale : 1}
               tool={tool}
               portShapeIds={portShapeIds}
               connectFrom={connectFrom}
               selectedConnectorId={tool === 'select' ? selectedConnectorId : null}
-              onPortClick={pickPort}
+              onPortClick={handlePortClick}
               onUpdate={onUpdate}
-              onRewire={rewireConnector}
+              onRewire={handleRewire}
             />
           )}
           <Transformer
@@ -1079,7 +1579,7 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
                   grid: GRID_SIZE,
                 },
               )
-              setGuides(snapped.guides)
+              paintGuidesRef.current(snapped.guides)
               return {
                 ...box,
                 x: snapped.box.x,
@@ -1088,38 +1588,63 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
                 height: snapped.box.h,
               }
             }}
-            onTransformEnd={() => setGuides([])}
+            onTransformEnd={() => paintGuidesRef.current([])}
             borderStroke={theme.select}
             anchorStroke={theme.select}
             anchorFill={theme.paper}
           />
-          {guides.map((g, i) =>
-            g.orientation === 'v' ? (
-              <Line
-                key={`g-v-${i}-${g.position}`}
-                points={[g.position, view.y - guideSpan, g.position, view.y + view.h + guideSpan]}
-                stroke={theme.select}
-                strokeWidth={Math.max(1, 1 / scale)}
-                dash={[6 / scale, 4 / scale]}
-                listening={false}
-              />
-            ) : (
-              <Line
-                key={`g-h-${i}-${g.position}`}
-                points={[view.x - guideSpan, g.position, view.x + view.w + guideSpan, g.position]}
-                stroke={theme.select}
-                strokeWidth={Math.max(1, 1 / scale)}
-                dash={[6 / scale, 4 / scale]}
-                listening={false}
-              />
-            ),
-          )}
+          <Line
+            ref={guideVRef}
+            points={guideDrawRef.current.vPts}
+            visible={guideDrawRef.current.vOn}
+            stroke={theme.select}
+            strokeWidth={Math.max(1, 1 / scale)}
+            dash={[6 / scale, 4 / scale]}
+            listening={false}
+          />
+          <Line
+            ref={guideHRef}
+            points={guideDrawRef.current.hPts}
+            visible={guideDrawRef.current.hOn}
+            stroke={theme.select}
+            strokeWidth={Math.max(1, 1 / scale)}
+            dash={[6 / scale, 4 / scale]}
+            listening={false}
+          />
         </Layer>
         <Layer listening={false}>
-          <AttachmentsLayer objects={visible} theme={theme} />
+          <AttachmentsLayer objects={withAttachments} theme={theme} />
           <RemoteCursors cursors={cursors} />
         </Layer>
       </Stage>
+      {editObj?.type === 'postit' && editStyle && !editText && (
+        // Native textarea placeholders ignore text-align/padding in some browsers (Safari).
+        <div
+          aria-hidden
+          className="pointer-events-none absolute z-20 flex items-center"
+          style={{
+            ...editStyle,
+            paddingTop: 0,
+            justifyContent:
+              objectTextAlign(editObj) === 'center'
+                ? 'center'
+                : objectTextAlign(editObj) === 'right'
+                  ? 'flex-end'
+                  : 'flex-start',
+            fontFamily: objectFontFamily(editObj),
+            fontWeight: cssFontWeight(editObj),
+            fontStyle: editObj.italic ? 'italic' : 'normal',
+            lineHeight: NOTE_LINE_HEIGHT,
+            textAlign: objectTextAlign(editObj),
+            color: theme.muted,
+            whiteSpace: 'pre-wrap',
+            transform: editObj.rotation ? `rotate(${editObj.rotation}deg)` : undefined,
+            transformOrigin: 'top left',
+          }}
+        >
+          Write a note…
+        </div>
+      )}
       {editObj && editStyle && (
         <textarea
           autoFocus
@@ -1138,7 +1663,7 @@ export const BoardCanvas = forwardRef<BoardCanvasHandle, Props>(function BoardCa
           }}
           placeholder={
             editObj.type === 'postit'
-              ? 'Write a note…'
+              ? undefined
               : editObj.type === 'text'
                 ? 'Type something…'
                 : editObj.type === 'frame'
@@ -1301,6 +1826,28 @@ function DraftNode({
       listening={false}
     />
   )
+}
+
+function connectorCullBox(o: BoardObject, objects: Record<string, BoardObject>) {
+  const from = o.fromId ? objects[o.fromId] : undefined
+  const to = o.toId ? objects[o.toId] : undefined
+  if (!from || !to) return null
+  const a = objectAABB(from)
+  const b = objectAABB(to)
+  let minX = Math.min(a.x, b.x)
+  let minY = Math.min(a.y, b.y)
+  let maxX = Math.max(a.x + a.w, b.x + b.w)
+  let maxY = Math.max(a.y + a.h, b.y + b.h)
+  const wp = o.points
+  if (wp) {
+    for (let i = 0; i + 1 < wp.length; i += 2) {
+      minX = Math.min(minX, wp[i])
+      maxX = Math.max(maxX, wp[i])
+      minY = Math.min(minY, wp[i + 1])
+      maxY = Math.max(maxY, wp[i + 1])
+    }
+  }
+  return { x: minX, y: minY, w: Math.max(1, maxX - minX), h: Math.max(1, maxY - minY) }
 }
 
 function clamp(n: number, a: number, b: number) {
