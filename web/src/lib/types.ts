@@ -154,7 +154,8 @@ export type SnapshotInfo = {
 }
 
 export type WsIncoming = {
-  type: 'state' | 'op' | 'cursor' | 'presence' | 'chat' | 'error'
+  type: 'state' | 'op' | 'cursor' | 'presence' | 'chat' | 'error' | 'pong'
+  /** On `op`: the applied op (or an ack). On `error`: the rejected op, when the error is about one. */
   op?: Op
   x?: number
   y?: number

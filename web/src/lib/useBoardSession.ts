@@ -20,6 +20,12 @@ type UndoStep = {
   redo: Op[]
 }
 
+const RETRY_BASE_MS = 500
+const RETRY_MAX_MS = 10_000
+const HEARTBEAT_MS = 20_000
+const STALE_MS = 45_000
+const CLOSE_POLICY_VIOLATION = 1008
+
 export function useBoardSession(boardId: string, user: User) {
   const [doc, setDoc] = useState<DocumentState>({ rev: 0, objects: {} })
   const [chat, setChat] = useState<ChatMessage[]>([])
@@ -28,8 +34,15 @@ export function useBoardSession(boardId: string, user: User) {
   const [cursors, setCursors] = useState<Record<string, RemoteCursor>>({})
   const [ready, setReady] = useState(false)
   const [connected, setConnected] = useState(false)
+  const [fatal, setFatal] = useState(false)
+  const [pendingCount, setPendingCount] = useState(0)
   const wsRef = useRef<WebSocket | null>(null)
-  const pendingRef = useRef(new Set<string>())
+  /** True once the current socket has received its `state`; ops sent earlier would race the rebase. */
+  const syncedRef = useRef(false)
+  /** Committed ops not yet acknowledged by the server, in send order. Replayed after reconnect. */
+  const outboxRef = useRef(new Map<string, Op>())
+  /** Streaming (drag) ops: never queued, only used to recognise their echo. */
+  const liveOpsRef = useRef(new Set<string>())
   const undoRef = useRef<UndoStep[]>([])
   const redoRef = useRef<UndoStep[]>([])
   const batchRef = useRef<UndoStep | null>(null)
@@ -40,10 +53,23 @@ export function useBoardSession(boardId: string, user: User) {
 
   const send = useCallback((payload: unknown) => {
     const ws = wsRef.current
-    if (ws && ws.readyState === WebSocket.OPEN) {
+    if (ws && syncedRef.current && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(payload))
+      return true
     }
+    return false
   }, [])
+
+  const syncPending = useCallback(() => setPendingCount(outboxRef.current.size), [])
+
+  const sendOp = useCallback(
+    (op: Op) => {
+      outboxRef.current.set(op.id, op)
+      syncPending()
+      send({ type: 'op', op })
+    },
+    [send, syncPending],
+  )
 
   const pushUndo = useCallback((step: UndoStep) => {
     if (!step.undo.length) return
@@ -54,22 +80,21 @@ export function useBoardSession(boardId: string, user: User) {
 
   const commitOp = useCallback(
     (op: Op, inverse?: Inverse) => {
-      pendingRef.current.add(op.id)
       const batch = batchRef.current
       if (batch) {
         batchOpsRef.current?.push(op)
-        send({ type: 'op', op })
+        sendOp(op)
         if (!inverse || replayingRef.current) return
         batch.redo.push(op)
         batch.undo.push(inverse)
         return
       }
       setDoc((d) => applyOp(d, op))
-      send({ type: 'op', op })
+      sendOp(op)
       if (!inverse || replayingRef.current) return
       pushUndo({ undo: [inverse], redo: [op] })
     },
-    [pushUndo, send],
+    [pushUndo, sendOp],
   )
 
   const withBatch = useCallback(
@@ -124,8 +149,7 @@ export function useBoardSession(boardId: string, user: User) {
         value,
         actorId: user.id,
       }
-      pendingRef.current.add(op.id)
-      send({ type: 'op', op })
+      if (send({ type: 'op', op })) liveOpsRef.current.add(op.id)
     },
     [send, user.id],
   )
@@ -185,11 +209,10 @@ export function useBoardSession(boardId: string, user: User) {
         id: newId('op'),
         value: template.value,
       }))
-      for (const op of ops) pendingRef.current.add(op.id)
       if (ops.length) setDoc((d) => applyOps(d, ops))
-      for (const op of ops) send({ type: 'op', op })
+      for (const op of ops) sendOp(op)
     },
-    [send],
+    [sendOp],
   )
 
   const undo = useCallback(() => {
@@ -219,43 +242,146 @@ export function useBoardSession(boardId: string, user: User) {
   )
 
   const sendChat = useCallback(
-    (text: string) => {
-      send({ type: 'chat', text })
-    },
+    (text: string) => send({ type: 'chat', text }),
     [send],
   )
 
   useEffect(() => {
     const sessionId = getSessionId()
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const unlock = readUnlockToken(boardId)
-    const unlockQ = unlock ? `&unlock=${encodeURIComponent(unlock)}` : ''
-    const url = `${proto}//${location.host}/ws/boards/${boardId}?userId=${encodeURIComponent(user.id)}&sessionId=${encodeURIComponent(sessionId)}${unlockQ}`
-    const ws = new WebSocket(url)
-    wsRef.current = ws
+    let ws: WebSocket | null = null
+    let stopped = false
+    let attempt = 0
+    let retryTimer: number | undefined
+    let lastSeen = Date.now()
+    let firstState = true
+    let stateOnSocket = false
+    const outbox = outboxRef.current
+    const liveOps = liveOpsRef.current
 
-    ws.onopen = () => setConnected(true)
-    ws.onclose = () => {
+    const buildUrl = () => {
+      const unlock = readUnlockToken(boardId)
+      const unlockQ = unlock ? `&unlock=${encodeURIComponent(unlock)}` : ''
+      return `${proto}//${location.host}/ws/boards/${boardId}?userId=${encodeURIComponent(user.id)}&sessionId=${encodeURIComponent(sessionId)}${unlockQ}`
+    }
+
+    const scheduleRetry = () => {
+      if (stopped || retryTimer !== undefined) return
+      const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** attempt)
+      attempt++
+      retryTimer = window.setTimeout(
+        () => {
+          retryTimer = undefined
+          connect()
+        },
+        delay / 2 + Math.random() * (delay / 2),
+      )
+    }
+
+    const detach = (sock: WebSocket, code?: number) => {
+      if (ws !== sock) return
+      sock.onopen = sock.onclose = sock.onmessage = null
+      if (sock.readyState === WebSocket.CONNECTING || sock.readyState === WebSocket.OPEN) sock.close()
+      ws = null
+      wsRef.current = null
+      syncedRef.current = false
+      liveOpsRef.current.clear()
       setConnected(false)
       setReady(false)
+      if (code === CLOSE_POLICY_VIOLATION) {
+        stopped = true
+        setFatal(true)
+        return
+      }
+      scheduleRetry()
     }
-    ws.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data as string) as WsIncoming
-      if (msg.type === 'state') {
-        if (msg.document) setDoc(msg.document)
-        if (msg.chat) setChat(msg.chat.messages ?? [])
-        if (msg.meta) setMeta(msg.meta)
-        if (msg.presence) setPresence(msg.presence)
-        setReady(true)
+
+    const reconnectNow = () => {
+      if (stopped || ws) return
+      if (retryTimer !== undefined) {
+        clearTimeout(retryTimer)
+        retryTimer = undefined
+      }
+      attempt = 0
+      connect()
+    }
+
+    const onState = (sock: WebSocket, msg: WsIncoming) => {
+      attempt = 0
+      const resetHistory = firstState || stateOnSocket
+      firstState = false
+      stateOnSocket = true
+      const queued = [...outbox.values()]
+      if (msg.document) setDoc(applyOps(msg.document, queued))
+      if (msg.chat) setChat(msg.chat.messages ?? [])
+      if (msg.meta) setMeta(msg.meta)
+      if (msg.presence) setPresence(msg.presence)
+      setCursors({})
+      liveOpsRef.current.clear()
+      if (resetHistory) {
         undoRef.current = []
         redoRef.current = []
+      }
+      syncedRef.current = true
+      setReady(true)
+      setConnected(true)
+      for (const op of queued) sock.send(JSON.stringify({ type: 'op', op }))
+    }
+
+    const connect = () => {
+      if (stopped || ws) return
+      const sock = new WebSocket(buildUrl())
+      ws = sock
+      wsRef.current = sock
+      stateOnSocket = false
+      lastSeen = Date.now()
+      sock.onopen = () => {
+        lastSeen = Date.now()
+      }
+      sock.onclose = (ev) => detach(sock, ev.code)
+      sock.onmessage = (ev) => {
+        lastSeen = Date.now()
+        handleMessage(sock, JSON.parse(ev.data as string) as WsIncoming)
+      }
+    }
+
+    const heartbeat = window.setInterval(() => {
+      if (!ws) return
+      if (Date.now() - lastSeen > STALE_MS) {
+        detach(ws)
+        return
+      }
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }))
+    }, HEARTBEAT_MS)
+
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return
+      if (ws && Date.now() - lastSeen > STALE_MS) detach(ws)
+      reconnectNow()
+    }
+
+    window.addEventListener('online', reconnectNow)
+    document.addEventListener('visibilitychange', onVisible)
+
+    const handleMessage = (sock: WebSocket, msg: WsIncoming) => {
+      if (msg.type === 'state') {
+        onState(sock, msg)
       } else if (msg.type === 'op' && msg.op) {
-        if (pendingRef.current.has(msg.op.id)) {
-          pendingRef.current.delete(msg.op.id)
-          setDoc((d) => ({ ...d, rev: msg.op!.seq ?? d.rev }))
+        const op = msg.op
+        if (outboxRef.current.delete(op.id)) {
+          syncPending()
+          setDoc((d) => ({ ...d, rev: op.seq ?? d.rev }))
+        } else if (liveOpsRef.current.delete(op.id)) {
+          setDoc((d) => ({ ...d, rev: op.seq ?? d.rev }))
         } else {
-          setDoc((d) => applyOp(d, msg.op!))
+          setDoc((d) => applyOp(d, op))
         }
+      } else if (msg.type === 'error') {
+        if (msg.op) {
+          liveOpsRef.current.delete(msg.op.id)
+          if (outboxRef.current.delete(msg.op.id)) syncPending()
+        }
+        if (msg.error) console.warn('liro:', msg.error)
       } else if (msg.type === 'cursor' && msg.sessionId) {
         if (msg.sessionId === sessionId) return
         setCursors((c) => ({
@@ -284,11 +410,28 @@ export function useBoardSession(boardId: string, user: User) {
       }
     }
 
+    connect()
+
     return () => {
-      ws.close()
+      stopped = true
+      if (retryTimer !== undefined) clearTimeout(retryTimer)
+      clearInterval(heartbeat)
+      window.removeEventListener('online', reconnectNow)
+      document.removeEventListener('visibilitychange', onVisible)
+      if (ws) {
+        const sock = ws
+        sock.onopen = sock.onclose = sock.onmessage = null
+        sock.close()
+      }
+      ws = null
       wsRef.current = null
+      syncedRef.current = false
+      outbox.clear()
+      liveOps.clear()
+      setPendingCount(0)
+      setFatal(false)
     }
-  }, [boardId, user.id])
+  }, [boardId, user.id, syncPending])
 
   return {
     doc,
@@ -298,6 +441,8 @@ export function useBoardSession(boardId: string, user: User) {
     cursors,
     ready,
     connected,
+    fatal,
+    pendingCount,
     createObject,
     updateObject,
     updateObjectLive,

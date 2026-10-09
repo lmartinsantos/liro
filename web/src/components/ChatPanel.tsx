@@ -9,9 +9,10 @@ type Props = {
   onClose: () => void
   messages: ChatMessage[]
   onSend: (text: string) => void
+  disabled?: boolean
 }
 
-export function ChatPanel({ open, onClose, messages, onSend }: Props) {
+export function ChatPanel({ open, onClose, messages, onSend, disabled }: Props) {
   const [text, setText] = useState('')
   const endRef = useRef<HTMLDivElement>(null)
 
@@ -60,13 +61,17 @@ export function ChatPanel({ open, onClose, messages, onSend }: Props) {
         onSubmit={(e) => {
           e.preventDefault()
           const t = text.trim()
-          if (!t) return
+          if (!t || disabled) return
           onSend(t)
           setText('')
         }}
       >
-        <Input value={text} onChange={(e) => setText(e.target.value)} placeholder="Message the board" />
-        <Button type="submit" size="icon" hint="Send">
+        <Input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder={disabled ? 'Reconnecting…' : 'Message the board'}
+        />
+        <Button type="submit" size="icon" hint="Send" disabled={disabled}>
           <Send />
         </Button>
       </form>

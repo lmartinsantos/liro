@@ -350,6 +350,57 @@ func TestMCPInitialize(t *testing.T) {
 	}
 }
 
+func TestReconnectSameSessionKeepsNewSocket(t *testing.T) {
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	hubs := hub.NewRegistry(st)
+	t.Cleanup(hubs.Close)
+	srv := httptest.NewServer(New(st, hubs, nil))
+	t.Cleanup(srv.Close)
+
+	rec, err := st.Create("Room")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var user model.User
+	rec.WithLock(func() { user, _, err = rec.AddUser("Luis") })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/boards/" + rec.Meta.ID + "?userId=" + user.ID + "&sessionId=ses_tab"
+	stale, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readType(t, ctx, stale, "state")
+	fresh, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Close(websocket.StatusNormalClosure, "")
+	readType(t, ctx, fresh, "state")
+	_ = stale.Close(websocket.StatusNormalClosure, "")
+	time.Sleep(100 * time.Millisecond)
+
+	raw, _ := json.Marshal(model.Object{ID: "obj_1", Type: "rect", W: 10, H: 10})
+	if err := wsjson.Write(ctx, fresh, hub.Envelope{
+		Type: "op",
+		Op:   &model.Op{ID: "op_1", Type: "create", Value: raw},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	env := readType(t, ctx, fresh, "op")
+	if env.Op == nil || env.Op.ID != "op_1" {
+		t.Fatalf("expected op echo on new socket, got %+v", env)
+	}
+}
+
 func readType(t *testing.T, ctx context.Context, conn *websocket.Conn, want string) hub.Envelope {
 	t.Helper()
 	for {

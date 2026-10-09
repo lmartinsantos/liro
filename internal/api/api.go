@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"io/fs"
@@ -590,6 +591,11 @@ func (s *Server) restoreSnapshot(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+const (
+	wsWriteTimeout = 10 * time.Second
+	wsPingInterval = 20 * time.Second
+)
+
 func (s *Server) wsBoard(w http.ResponseWriter, r *http.Request) {
 	boardID := chi.URLParam(r, "id")
 	userID := r.URL.Query().Get("userId")
@@ -638,16 +644,38 @@ func (s *Server) wsBoard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() {
-		s.Hubs.Leave(boardID, client.ID)
+		s.Hubs.Leave(boardID, client)
 		_ = c.Close(websocket.StatusNormalClosure, "")
 	}()
 
-	ctx := r.Context()
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
 	go func() {
+		defer func() { _ = c.Close(websocket.StatusTryAgainLater, "resync") }()
 		for data := range client.Send {
-			wctx := ctx
-			if err := c.Write(wctx, websocket.MessageText, data); err != nil {
+			wctx, wcancel := context.WithTimeout(ctx, wsWriteTimeout)
+			err := c.Write(wctx, websocket.MessageText, data)
+			wcancel()
+			if err != nil {
 				return
+			}
+		}
+	}()
+	go func() {
+		t := time.NewTicker(wsPingInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				pctx, pcancel := context.WithTimeout(ctx, wsWriteTimeout)
+				err := c.Ping(pctx)
+				pcancel()
+				if err != nil {
+					_ = c.Close(websocket.StatusGoingAway, "ping timeout")
+					return
+				}
 			}
 		}
 	}()

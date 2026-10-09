@@ -53,6 +53,11 @@ func (reg *Registry) Apply(boardID, actorID string, ops []model.Op) ([]model.Op,
 	room := reg.rooms[boardID]
 	reg.mu.Unlock()
 	if room != nil {
+		ids := make([]string, len(applied))
+		for i := range applied {
+			ids[i] = applied[i].ID
+		}
+		room.recordOps(ids...)
 		for i := range applied {
 			op := applied[i]
 			room.broadcast(Envelope{Type: "op", Op: &op}, "")
@@ -97,7 +102,7 @@ func (reg *Registry) TouchAgent(boardID string, user model.User) error {
 			Name:      user.Name,
 			Color:     user.Color,
 		},
-		Send:  make(chan []byte, 64),
+		Send:  make(chan []byte, SendBuffer),
 		agent: true,
 		seen:  now,
 	}
@@ -134,7 +139,7 @@ func (reg *Registry) evictAgentLater(boardID, clientID string) {
 			room.mu.Unlock()
 			continue
 		}
-		safeClose(cl.Send)
+		cl.close()
 		delete(room.clients, clientID)
 		empty := len(room.clients) == 0
 		room.mu.Unlock()

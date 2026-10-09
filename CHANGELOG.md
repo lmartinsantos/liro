@@ -9,6 +9,18 @@ Version numbers are defined in [`VERSIONS`](VERSIONS).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-10-09
+
+### Added
+
+- Edits made while offline are kept and synced on reconnect, and the status dot shows unsynced changes
+
+### Fixed
+
+- Boards reconnect automatically after the connection drops (backoff, heartbeats, and immediate retry when the network or tab comes back)
+- Reconnecting from the same tab no longer leaves the new connection silently receiving nothing
+- Peers falling behind (for example during large agent batches) are resynced instead of silently missing updates; resent edits are deduplicated
+
 ## [0.3.0] — 2026-10-09
 
 ### Added

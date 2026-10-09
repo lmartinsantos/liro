@@ -13,6 +13,11 @@ import (
 
 const EvictAfter = 30 * time.Second
 
+// SendBuffer is the per-client outbound queue; a client that falls this far behind is kicked so it resyncs.
+var SendBuffer = 1024
+
+const recentOpIDs = 4096
+
 // AgentIdle is how long a synthetic MCP presence session stays after the last touch.
 var AgentIdle = 2 * time.Minute
 
@@ -40,6 +45,16 @@ type Client struct {
 	Send    chan []byte
 	agent   bool
 	seen    time.Time
+	closed  bool
+}
+
+// close must be called with the owning room's mu held.
+func (c *Client) close() {
+	if c.closed {
+		return
+	}
+	c.closed = true
+	close(c.Send)
 }
 
 type inbound struct {
@@ -55,6 +70,10 @@ type Room struct {
 	clients map[string]*Client
 	inbox   chan inbound
 	quit    chan struct{}
+
+	opMu    sync.Mutex
+	opSeen  map[string]struct{}
+	opOrder []string
 }
 
 type Registry struct {
@@ -91,9 +110,12 @@ func (reg *Registry) Join(boardID string, session model.Session) (*Room, *Client
 	cl := &Client{
 		ID:      session.SessionID,
 		Session: session,
-		Send:    make(chan []byte, 64),
+		Send:    make(chan []byte, SendBuffer),
 	}
 	room.mu.Lock()
+	if old, ok := room.clients[cl.ID]; ok {
+		old.close()
+	}
 	room.clients[cl.ID] = cl
 	room.mu.Unlock()
 	room.sendState(cl)
@@ -107,7 +129,7 @@ type errString string
 
 func (e errString) Error() string { return string(e) }
 
-func (reg *Registry) leave(boardID, clientID string) {
+func (reg *Registry) leave(boardID string, cl *Client) {
 	reg.mu.Lock()
 	room, ok := reg.rooms[boardID]
 	reg.mu.Unlock()
@@ -115,12 +137,16 @@ func (reg *Registry) leave(boardID, clientID string) {
 		return
 	}
 	room.mu.Lock()
-	if cl, exists := room.clients[clientID]; exists {
-		safeClose(cl.Send)
-		delete(room.clients, clientID)
+	cl.close()
+	current := room.clients[cl.ID] == cl
+	if current {
+		delete(room.clients, cl.ID)
 	}
 	empty := len(room.clients) == 0
 	room.mu.Unlock()
+	if !current {
+		return
+	}
 	if empty {
 		go reg.evictLater(boardID)
 	} else {
@@ -158,7 +184,7 @@ func (reg *Registry) Close() {
 		close(room.quit)
 		room.mu.Lock()
 		for _, cl := range room.clients {
-			safeClose(cl.Send)
+			cl.close()
 		}
 		room.clients = map[string]*Client{}
 		room.mu.Unlock()
@@ -178,19 +204,16 @@ func (reg *Registry) ensureRoom(boardID string, rec *store.BoardRecord) *Room {
 		clients: map[string]*Client{},
 		inbox:   make(chan inbound, 128),
 		quit:    make(chan struct{}),
+		opSeen:  map[string]struct{}{},
 	}
 	reg.rooms[boardID] = room
 	go room.loop()
 	return room
 }
 
-func safeClose(ch chan []byte) {
-	defer func() { _ = recover() }()
-	close(ch)
-}
-
-func (reg *Registry) Leave(boardID, clientID string) {
-	reg.leave(boardID, clientID)
+// Leave removes cl from the room unless a newer connection with the same session already replaced it.
+func (reg *Registry) Leave(boardID string, cl *Client) {
+	reg.leave(boardID, cl)
 }
 
 // Drop closes a room immediately and unloads the board (used before permanent delete).
@@ -208,7 +231,7 @@ func (reg *Registry) Drop(boardID string) {
 	close(room.quit)
 	room.mu.Lock()
 	for _, cl := range room.clients {
-		safeClose(cl.Send)
+		cl.close()
 	}
 	room.clients = map[string]*Client{}
 	room.mu.Unlock()
@@ -261,6 +284,13 @@ func (r *Room) handle(in inbound) {
 		}
 		op := *in.msg.Op
 		op.ActorID = in.client.Session.UserID
+		if op.ID == "" {
+			op.ID = id.New("op")
+		}
+		if r.opApplied(op.ID) {
+			r.send(in.client, Envelope{Type: "op", Op: &op})
+			return
+		}
 		var applied model.Op
 		var applyErr error
 		r.rec.WithLock(func() {
@@ -271,10 +301,13 @@ func (r *Room) handle(in inbound) {
 			}
 		})
 		if applyErr != nil {
-			r.sendErr(in.client, applyErr.Error())
+			r.send(in.client, Envelope{Type: "error", Error: applyErr.Error(), Op: &op})
 			return
 		}
+		r.recordOps(applied.ID)
 		r.broadcast(Envelope{Type: "op", Op: &applied}, "")
+	case "ping":
+		r.send(in.client, Envelope{Type: "pong"})
 	case "cursor":
 		r.broadcast(Envelope{
 			Type:      "cursor",
@@ -361,9 +394,35 @@ func (r *Room) presence() []model.Session {
 func (r *Room) presenceLocked() []model.Session {
 	out := make([]model.Session, 0, len(r.clients))
 	for _, c := range r.clients {
+		if c.closed {
+			continue
+		}
 		out = append(out, c.Session)
 	}
 	return out
+}
+
+func (r *Room) opApplied(opID string) bool {
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+	_, ok := r.opSeen[opID]
+	return ok
+}
+
+func (r *Room) recordOps(opIDs ...string) {
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+	for _, opID := range opIDs {
+		if _, ok := r.opSeen[opID]; ok {
+			continue
+		}
+		r.opSeen[opID] = struct{}{}
+		r.opOrder = append(r.opOrder, opID)
+	}
+	for len(r.opOrder) > recentOpIDs {
+		delete(r.opSeen, r.opOrder[0])
+		r.opOrder = r.opOrder[1:]
+	}
 }
 
 func (r *Room) broadcastPresence() {
@@ -380,9 +439,11 @@ func (r *Room) send(cl *Client, env Envelope) {
 		log.Println("marshal:", err)
 		return
 	}
-	select {
-	case cl.Send <- data:
-	default:
+	r.mu.Lock()
+	kicked := r.deliverLocked(cl, data)
+	r.mu.Unlock()
+	if kicked {
+		r.broadcastPresence()
 	}
 }
 
@@ -391,15 +452,34 @@ func (r *Room) broadcast(env Envelope, except string) {
 	if err != nil {
 		return
 	}
+	kicked := false
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	for id, cl := range r.clients {
 		if id == except {
 			continue
 		}
-		select {
-		case cl.Send <- data:
-		default:
+		if r.deliverLocked(cl, data) {
+			kicked = true
 		}
+	}
+	r.mu.Unlock()
+	if kicked {
+		r.broadcastPresence()
+	}
+}
+
+// deliverLocked queues data for cl; a full queue closes the client so its connection drops and it resyncs on reconnect.
+// Reports whether cl was kicked.
+func (r *Room) deliverLocked(cl *Client, data []byte) bool {
+	if cl.closed {
+		return false
+	}
+	select {
+	case cl.Send <- data:
+		return false
+	default:
+		log.Printf("hub: kicking slow client %s on board %s", cl.ID, r.id)
+		cl.close()
+		return true
 	}
 }

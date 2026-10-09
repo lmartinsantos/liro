@@ -68,6 +68,12 @@ const toolKeys: Record<string, Tool> = {
   k: 'lane',
 }
 
+function connectionLabel(connected: boolean, fatal: boolean, pending: number) {
+  if (fatal) return 'Disconnected — reload the page to rejoin'
+  const unsynced = pending ? ` · ${pending} unsynced change${pending === 1 ? '' : 's'}` : ''
+  return (connected ? 'Live' : 'Reconnecting') + unsynced
+}
+
 export function BoardPage() {
   const { boardId = '' } = useParams()
   const nav = useNavigate()
@@ -508,8 +514,14 @@ function BoardSession({
           </span>
           <span
             className="ml-1 size-2 rounded-full"
-            title={session.connected ? 'Live' : 'Reconnecting'}
-            style={{ background: session.connected ? 'var(--success)' : 'var(--muted-foreground)' }}
+            title={connectionLabel(session.connected, session.fatal, session.pendingCount)}
+            style={{
+              background: session.fatal
+                ? 'var(--destructive)'
+                : session.connected
+                  ? 'var(--success)'
+                  : 'var(--muted-foreground)',
+            }}
           />
           <Button
             type="button"
@@ -739,6 +751,7 @@ function BoardSession({
           onClose={() => setChatOpen(false)}
           messages={session.chat}
           onSend={session.sendChat}
+          disabled={!session.connected}
         />
       </div>
 
